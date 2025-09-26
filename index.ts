@@ -1,65 +1,63 @@
-
-// Measure context and logging
-export type MeasureContext = {
-  requestId?: string;
+export type measurecontext = {
+  requestid?: string;
   level?: number;
-  parentAction?: string;
-  idChain?: string[]; // Chain of nested IDs
+  idchain?: string[];
 };
 
-export async function measure<T>(
-  fn: (measure: typeof measure) => Promise<T>,
+export async function measure<t>(
+  fn: (measure: typeof measure) => promise<t>,
   action: string | object,
-  context: MeasureContext = {}
-): Promise<T> {
+  context: measurecontext = {}
+): promise<t> {
   const start = performance.now();
-  const currentId = Math.random().toString(36).substring(2, 8);
-  const parentIdChain = (context.idChain || []).map(id => `[${id}]`).join('');
-  const fullIdChain = [...(context.idChain || []), currentId].map(id => `[${id}]`).join('');
+  const currentid = math.random().tostring(36).substring(2, 8);
+  const parentidchain = (context.idchain || []).map(id => `[${id}]`).join('');
+  const fullidchain = [...(context.idchain || []), currentid].map(id => `[${id}]`).join('');
 
   try {
-    // Handle object vs string action
-    const actionLabel = typeof action === 'object' && action !== null && 'label' in action 
-      ? String(action.label) 
+    const actionlabel = typeof action === 'object' && action !== null && 'label' in action 
+      ? string(action.label) 
       : typeof action === 'object' 
-        ? String(action) 
+        ? string(action) 
         : action;
     
-    // Opening: show parent chain + action + new ID
-    if (parentIdChain) {
-      console.log(`> ${parentIdChain} ${actionLabel} (${currentId})`);
+    if (parentidchain) {
+      console.log(`> ${parentidchain} ${actionlabel} (${currentid})`);
     } else {
-      console.log(`> ${actionLabel} (${currentId})`);
+      console.log(`> ${actionlabel} (${currentid})`);
     }
     
-    // If action is an object, also print it as a table
     if (typeof action === 'object' && action !== null) {
-      console.table(action);
+      delete action.label;
+      if (object.keys(action).length > 0) {
+        console.log(json.stringify(action, null, 2));
+      }
     }
 
-    const result = await fn((nestedFn, nestedAction) =>
-      measure(nestedFn, nestedAction, {
+    const result = await fn((nestedfn, nestedaction) =>
+      measure(nestedfn, nestedaction, {
         ...context,
-        idChain: [...(context.idChain || []), currentId],
+        idchain: [...(context.idchain || []), currentid],
         level: (context.level || 0) + 1,
-        parentAction: action,
       })
     );
 
     const duration = performance.now() - start;
-    console.log(`< ${fullIdChain} ✓ ${duration.toFixed(2)}ms`);
+    console.log(`< ${fullidchain} ✓ ${duration.tofixed(2)}ms`);
     return result;
   } catch (error) {
     const duration = performance.now() - start;
-    // console.log('=========================== ERROR ===========================');
-    console.log(`< ${fullIdChain} ✗ FAILED ${duration.toFixed(2)}ms`);
-    if (error instanceof Error) {
-      console.error(`${fullIdChain}`, error.stack ?? error.message);
+    // console.log('=========================== error ===========================');
+    console.log(`< ${fullidchain} ✗ failed ${duration.tofixed(2)}ms`);
+    if (error instanceof error) {
+      console.error(`${fullidchain}`, error.stack ?? error.message);
     } else {
-      console.error(`${fullIdChain}`, error);
+      console.error(`${fullidchain}`, error);
     }
     // console.log('=============================================================');
     // throw error;
     return null;
   }
 }
+
+export const noop = () => {};
