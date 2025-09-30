@@ -1,63 +1,74 @@
-export type measurecontext = {
-  requestid?: string;
-  level?: number;
-  idchain?: string[];
-};
-
-export async function measure<t>(
-  fn: (measure: typeof measure) => promise<t>,
-  action: string | object,
-  context: measurecontext = {}
-): promise<t> {
-  const start = performance.now();
-  const currentid = math.random().tostring(36).substring(2, 8);
-  const parentidchain = (context.idchain || []).map(id => `[${id}]`).join('');
-  const fullidchain = [...(context.idchain || []), currentid].map(id => `[${id}]`).join('');
-
-  try {
-    const actionlabel = typeof action === 'object' && action !== null && 'label' in action 
-      ? string(action.label) 
-      : typeof action === 'object' 
-        ? string(action) 
-        : action;
-    
-    if (parentidchain) {
-      console.log(`> ${parentidchain} ${actionlabel} (${currentid})`);
-    } else {
-      console.log(`> ${actionlabel} (${currentid})`);
-    }
-    
-    if (typeof action === 'object' && action !== null) {
-      delete action.label;
-      if (object.keys(action).length > 0) {
-        console.log(json.stringify(action, null, 2));
-      }
-    }
-
-    const result = await fn((nestedfn, nestedaction) =>
-      measure(nestedfn, nestedaction, {
-        ...context,
-        idchain: [...(context.idchain || []), currentid],
-        level: (context.level || 0) + 1,
-      })
-    );
-
-    const duration = performance.now() - start;
-    console.log(`< ${fullidchain} ✓ ${duration.tofixed(2)}ms`);
-    return result;
-  } catch (error) {
-    const duration = performance.now() - start;
-    // console.log('=========================== error ===========================');
-    console.log(`< ${fullidchain} ✗ failed ${duration.tofixed(2)}ms`);
-    if (error instanceof error) {
-      console.error(`${fullidchain}`, error.stack ?? error.message);
-    } else {
-      console.error(`${fullidchain}`, error);
-    }
-    // console.log('=============================================================');
-    // throw error;
-    return null;
-  }
+function toAlpha(num: number): string {
+  let result = '';
+  let n = num;
+  do {
+    result = String.fromCharCode(97 + (n % 26)) + result;
+    n = Math.floor(n / 26) - 1;
+  } while (n >= 0);
+  return result;
 }
 
-export const noop = () => {};
+export async function measure<T>(
+  fn: (measure: typeof measure) => Promise<T>,
+  action: string | object
+): Promise<T | null> {
+  const _measureInternal = async <U>(
+    fnInternal: (measure: (fn: any, action: any) => Promise<U | null>) => Promise<U>,
+    actionInternal: string | object,
+    parentIdChain: string[]
+  ): Promise<U | null> => {
+    const start = performance.now();
+    let childCounter = 0;
+
+    const currentId = toAlpha(parentIdChain.pop() ?? 0);
+    const fullIdChain = [...parentIdChain, currentId];
+    const fullIdChainStr = `[${fullIdChain.join('-')}]`;
+
+    try {
+      const actionLabel =
+        typeof actionInternal === 'object' && actionInternal !== null && 'label' in actionInternal
+          ? String(actionInternal.label)
+          : String(actionInternal);
+
+      let logMessage = `> ${fullIdChainStr} ${actionLabel}`;
+
+      if (typeof actionInternal === 'object' && actionInternal !== null) {
+        const details = { ...actionInternal };
+        delete (details as { label?: string }).label;
+        if (Object.keys(details).length > 0) {
+          const params = Object.entries(details)
+            .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
+            .join(' ');
+          logMessage += ` (${params})`;
+        }
+      }
+
+      console.log(logMessage);
+
+      const measureForNextLevel = (nestedFn: any, nestedAction: any) => {
+        const childParentChain = [...fullIdChain, childCounter++];
+        return _measureInternal(nestedFn, nestedAction, childParentChain);
+      };
+
+      const result = await fnInternal(measureForNextLevel);
+
+      const duration = performance.now() - start;
+      console.log(`< ${fullIdChainStr} ✓ ${duration.toFixed(2)}ms`);
+      return result;
+    } catch (error) {
+      const duration = performance.now() - start;
+      console.log(`< ${fullIdChainStr} ✗ ${duration.toFixed(2)}ms (${error.message})`);
+      if (error instanceof Error) {
+        console.error(`${fullIdChainStr}`, error.stack ?? error.message);
+        if (error.cause) {
+          console.error(`${fullIdChainStr} Cause:`, error.cause);
+        }
+      } else {
+        console.error(`${fullIdChainStr}`, error);
+      }
+      return null;
+    }
+  };
+
+  return _measureInternal(fn, action, []);
+}
