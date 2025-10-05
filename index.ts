@@ -34,7 +34,7 @@ export async function measure<T = null>(
 
       if (typeof actionInternal === 'object' && actionInternal !== null) {
         const details = { ...actionInternal };
-        delete (details as { label?: string }).label;
+        if ('label' in details) delete details.label;
         if (Object.keys(details).length > 0) {
           const params = Object.entries(details)
             .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
@@ -45,9 +45,36 @@ export async function measure<T = null>(
 
       console.log(logMessage);
 
-      const measureForNextLevel = (nestedFn: any, nestedAction: any) => {
-        const childParentChain = [...fullIdChain, childCounter++];
-        return _measureInternal(nestedFn, nestedAction, childParentChain);
+      const measureForNextLevel = (...args: any[]) => {
+        if (typeof args[0] === 'function') {
+          const nestedFn = args[0];
+          const nestedAction = args[1] || 'noop';
+          const childParentChain = [...fullIdChain, childCounter++];
+          return _measureInternal(nestedFn, nestedAction, childParentChain);
+        } else {
+          const actionInternalNested = args[0];
+          if (!actionInternalNested) return Promise.resolve(null);
+          const actionLabelNested =
+            typeof actionInternalNested === 'object' && actionInternalNested !== null && 'label' in actionInternalNested
+              ? String(actionInternalNested.label)
+              : String(actionInternalNested);
+
+          let logMessageNested = `= ${fullIdChainStr} ${actionLabelNested}`;
+
+          if (typeof actionInternalNested === 'object' && actionInternalNested !== null) {
+            const details = { ...actionInternalNested };
+            if ('label' in details) delete details.label;
+            if (Object.keys(details).length > 0) {
+              const params = Object.entries(details)
+                .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
+                .join(' ');
+              logMessageNested += ` (${params})`;
+            }
+          }
+
+          console.log(logMessageNested);
+          return Promise.resolve(null);
+        }
       };
 
       const result = await fnInternal(measureForNextLevel);
@@ -57,7 +84,8 @@ export async function measure<T = null>(
       return result;
     } catch (error) {
       const duration = performance.now() - start;
-      console.log(`< ${fullIdChainStr} ✗ ${duration.toFixed(2)}ms (${error.message})`);
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.log(`< ${fullIdChainStr} ✗ ${duration.toFixed(2)}ms (${errorMsg})`);
       if (error instanceof Error) {
         console.error(`${fullIdChainStr}`, error.stack ?? error.message);
         if (error.cause) {
@@ -71,10 +99,9 @@ export async function measure<T = null>(
   };
 
   if (typeof arg1 === 'function') {
-    return _measureInternal(arg1 as any, action!, []) as Promise<T | null>;
+    return _measureInternal(arg1 as any, action || 'noop', []) as Promise<T | null>;
   } else {
     const dummyFn = async (_measureForNextLevel: any): Promise<null> => null;
     return _measureInternal(dummyFn, arg1, []) as Promise<T | null>;
   }
 }
-
