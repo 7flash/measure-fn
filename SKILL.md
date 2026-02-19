@@ -3,111 +3,196 @@ name: measure-fn
 description: Zero-dependency function performance measurement with hierarchical logging. Use this to structure ALL programs as measured, observable pipelines.
 ---
 
-# measure-fn — Structured Program Measurement
+# measure-fn — Write Observable Code
 
-**Every program you write should be observable from day one.**
+**Every function you write should be measured.** Don't write blind code — wrap operations in `measure` so every success, failure, and timing is automatically visible. This is the default way to structure programs.
 
-## Installation
+## Install
 
 ```bash
 bun add measure-fn
 ```
 
-## Output Format
+## The Rule
 
-```
-[id] ... label          — start (async / sync with children)
-[id] ✓ label Nms → val  — success with auto-printed result
-[id] ✗ label Nms (err)  — error
-[id] = label            — annotation / progress
-```
-
-No indentation, no colors. IDs encode hierarchy. Smart duration: `0.10ms` → `1.2s` → `2m 5s`.
-
-## Core API
+> If a function does I/O, computation, or anything non-trivial — **wrap it in `measure`**.
 
 ```typescript
-import { measure, measureSync, createMeasure, configure } from 'measure-fn';
+// ✗ BAD — blind, silent, no timing, no error visibility
+const users = await fetchUsers();
+const config = loadConfig();
 
-// Async
+// ✓ GOOD — observable, timed, errors auto-logged
 const users = await measure('Fetch users', () => fetchUsers());
-
-// Sync (leaf = single line)
 const config = measureSync('Load config', () => loadConfig());
+```
 
-// Nested + parallel
+## Patterns
+
+### 1. Every entry point is a measured pipeline
+
+```typescript
+import { measure, measureSync } from 'measure-fn';
+
+async function main() {
+  const config = measureSync('Load config', () => readConfig());
+  const db = await measure('Connect DB', () => connectDatabase(config));
+  const users = await measure('Fetch users', () => db.query('SELECT * FROM users'));
+  await measure('Send emails', () => sendEmails(users));
+}
+```
+
+Output:
+```
+[a] ✓ Load config 0.12ms → {"env":"prod"}
+[b] ... Connect DB
+[b] ✓ Connect DB 45ms → [DB]
+[c] ... Fetch users
+[c] ✓ Fetch users 23ms → [{"id":1},{"id":2}]
+[d] ... Send emails
+[d] ✓ Send emails 102ms
+```
+
+### 2. Nested operations use the child measure
+
+```typescript
 await measure('Pipeline', async (m) => {
-  await Promise.all([
-    m({ label: 'Fetch', userId: 1 }, () => fetchUser(1)),
-    m({ label: 'Fetch', userId: 2 }, () => fetchUser(2)),
-  ]);
+  const raw = await m('Fetch', () => fetchData());
+  const parsed = m('Parse', () => parseData(raw));
+  await m('Save', () => saveResult(parsed));
 });
+```
 
-// Wrap: decorator pattern — wrap once, measure every call
+### 3. Parallel work with `Promise.all`
+
+```typescript
+await measure('Load all', async (m) => {
+  const [users, posts, settings] = await Promise.all([
+    m('Users', () => fetchUsers()),
+    m('Posts', () => fetchPosts()),
+    m('Settings', () => fetchSettings()),
+  ]);
+  return { users, posts, settings };
+});
+```
+
+### 4. Wrap reusable functions once
+
+```typescript
 const getUser = measure.wrap('Get user', fetchUser);
-await getUser(1);
-await getUser(2);
+// Every call is now measured automatically
+await getUser(1);  // → [a] ✓ Get user 82ms → {...}
+await getUser(2);  // → [b] ✓ Get user 75ms → {...}
+```
 
-// Batch: process array with progress logging
-await measure.batch('Process', items, async (item) => transform(item), { every: 100 });
+### 5. Process arrays with progress
 
-// Retry: automatic retry with backoff
-await measure.retry('Flaky', { attempts: 3, delay: 1000, backoff: 2 }, () => flakyApi());
+```typescript
+await measure.batch('Process users', userIds, async (id) => {
+  return await processUser(id);
+}, { every: 100 });
+// → [a] ... Process users (500 items)
+// → [a] = 100/500 (1.2s, 83/s)
+// → [a] ✓ Process users (500 items) 5.3s → "500/500 ok"
+```
 
-// Assert: throws if null (type-narrowing)
-const user = await measure.assert('Get user', () => fetchUser(1));
+### 6. Retry flaky operations
 
-// Budget: warn when operation exceeds time limit
-await measure({ label: 'DB query', budget: 100 }, () => query());
+```typescript
+const result = await measure.retry('External API', {
+  attempts: 3, delay: 1000, backoff: 2
+}, () => callExternalService());
+```
 
-// Scoped: separate namespace and counter
-const api = createMeasure('api');  // → [api:a], [api:b], ...
-const db = createMeasure('db');    // → [db:a], [db:b], ...
+### 7. Budget warnings for slow ops
+
+```typescript
+await measure({ label: 'DB query', budget: 100 }, () => heavyQuery());
+// → [a] ✓ DB query 245ms → [...] ⚠ OVER BUDGET (100ms)
+```
+
+### 8. Assert non-null results
+
+```typescript
+// Guaranteed non-null — throws if the function returns null/undefined
+const user = await measure.assert('Get user', () => findUser(id));
+```
+
+### 9. Scoped instances for subsystems
+
+```typescript
+const api = createMeasure('api');
+const db = createMeasure('db');
+
+await api.measure('GET /users', async () => {
+  return await db.measure('SELECT', () => query('SELECT * FROM users'));
+});
+// → [api:a] ... GET /users
+// → [db:a] ✓ SELECT 44ms → [...]
+// → [api:a] ✓ GET /users 45ms → [...]
+```
+
+### 10. Annotations for checkpoints
+
+```typescript
+await measure('Server ready');           // → [a] = Server ready
+measureSync('Config loaded');             // → [b] = Config loaded
 ```
 
 ## Configuration
 
 ```typescript
+import { configure } from 'measure-fn';
+
 configure({
-  silent: true,            // suppress output
+  silent: true,            // suppress output (for benchmarks)
   timestamps: true,        // [HH:MM:SS.mmm] prefix
   maxResultLength: 200,    // result truncation (default: 80)
-  logger: (event) => ...,  // custom event handler
+  logger: (event) => {     // custom telemetry
+    myTracker.send(event);
+  },
 });
 ```
 
-Env: `MEASURE_SILENT=1`, `MEASURE_TIMESTAMPS=1`
+Env vars: `MEASURE_SILENT=1`, `MEASURE_TIMESTAMPS=1`
 
-## Utilities
+## Programmatic Timing
 
 ```typescript
-import { safeStringify, formatDuration, resetCounter } from 'measure-fn';
+const { result, duration } = await measure.timed('Fetch', () => fetchUsers());
+if (duration > 1000) alert('Slow!');
 ```
 
-## API Reference
+## Anti-Patterns
 
-| Export | Description |
-|--------|-------------|
+```typescript
+// ✗ Don't measure trivial synchronous expressions
+const x = measureSync('Add', () => 1 + 1);
+
+// ✗ Don't nest measure inside measure without using child `m`
+await measure('Outer', async () => {
+  await measure('Inner', () => work());  // creates flat siblings, not hierarchy
+});
+
+// ✓ Use child measure for hierarchy
+await measure('Outer', async (m) => {
+  await m('Inner', () => work());  // proper parent → child
+});
+```
+
+## Quick Reference
+
+| Export | Use |
+|--------|-----|
 | `measure(label, fn?)` | Async measurement |
-| `measure.timed(label, fn?)` | Returns `{ result, duration }` |
+| `measureSync(label, fn?)` | Sync measurement |
+| `measure.wrap(label, fn)` | Decorator — wrap once, measure every call |
+| `measure.batch(label, items, fn, opts?)` | Array + progress |
 | `measure.retry(label, opts, fn)` | Retry with backoff |
 | `measure.assert(label, fn)` | Throws if null |
-| `measure.wrap(label, fn)` | Returns measured version of fn |
-| `measure.batch(label, items, fn, opts?)` | Array processing with progress |
-| `measureSync(label, fn?)` | Sync measurement |
-| `measureSync.timed/assert/wrap` | Sync variants |
+| `measure.timed(label, fn)` | Returns `{ result, duration }` |
 | `createMeasure(prefix)` | Scoped instance |
-| `configure(opts)` | Runtime configuration |
-| `resetCounter()` | Reset global ID counter |
-| `safeStringify(value)` | Safe JSON with circular ref handling |
-| `formatDuration(ms)` | Smart duration formatting |
-
-## Testing
-
-```typescript
-import { resetCounter, configure } from 'measure-fn';
-beforeEach(() => {
-  resetCounter();
-  configure({ silent: false, logger: null, timestamps: false });
-});
-```
+| `configure(opts)` | Runtime config |
+| `safeStringify(value)` | Safe JSON (circular refs, truncation) |
+| `formatDuration(ms)` | Smart duration: `0.10ms` → `1.2s` → `2m 5s` |
+| `resetCounter()` | Reset ID counter |

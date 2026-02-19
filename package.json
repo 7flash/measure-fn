@@ -2,7 +2,7 @@
   "name": "measure-fn",
   "module": "index.ts",
   "main": "./index.ts",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "type": "module",
   "private": false,
   "description": "Zero-dependency function performance measurement with hierarchical logging",
