@@ -1,5 +1,7 @@
 # measure-fn
 
+![CI](https://github.com/7flash/measure-fn/actions/workflows/ci.yml/badge.svg)
+
 **Stop writing blind code.** Every function you write either succeeds or fails, takes some amount of time, and lives inside a larger flow. `measure-fn` makes all of that visible — automatically, hierarchically.
 
 ```
