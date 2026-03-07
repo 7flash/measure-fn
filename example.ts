@@ -116,7 +116,7 @@ async function bunServeExample() {
         return new Response(`ok: ${url.pathname}`);
       },
       (error) => new Response(`Error: ${(error as Error).message}`, { status: 500 })
-    ),
+    ) as any,
   });
 
   // ✅ Pattern 2: measure.assert — throws on error (sugar for onError + throw)

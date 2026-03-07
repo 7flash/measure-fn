@@ -527,7 +527,7 @@ describe("onError (3rd argument)", () => {
             throw new Error('not found');
         }, () => 'fallback');
         out.restore();
-        expect(result).toBe('fallback');
+        expect(result).toBe('fallback' as any);
     });
 
     test("returns normal result on success (onError ignored)", async () => {
@@ -565,7 +565,7 @@ describe("onError (3rd argument)", () => {
             throw error;
         });
         out.restore();
-        expect(result).toBe('recovered');
+        expect(result).toBe('recovered' as any);
     });
 
     test("still logs error even when onError handles it", async () => {
@@ -774,7 +774,7 @@ describe("custom logger", () => {
         const events: MeasureEvent[] = [];
         configure({ logger: (e) => events.push(e) });
         await measure({ label: "op", budget: 100 }, async () => 1);
-        expect(events[1].budget).toBe(100);
+        expect(events[1]!.budget).toBe(100);
     });
 });
 
