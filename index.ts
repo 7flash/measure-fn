@@ -211,6 +211,7 @@ const defaultLogger = (event: MeasureEvent, prefix?: string) => {
 
 export type MeasureFn = {
   <U>(label: string | object, fn: () => Promise<U>): Promise<U | null>;
+  <U>(label: string | object, fn: (m: MeasureFn, ms: MeasureSyncFn) => Promise<U>): Promise<U | null>;
   <U>(label: string | object, fn: (m: MeasureFn) => Promise<U>): Promise<U | null>;
   (label: string | object): Promise<null>;
 };
@@ -283,7 +284,7 @@ const createMeasureImpl = (prefix?: string, counterRef?: { value: number }, scop
   let _lastError: unknown = null;
 
   const _measureInternal = async <U>(
-    fnInternal: (measure: MeasureFn) => Promise<U>,
+    fnInternal: (measure: MeasureFn, measureSync: MeasureSyncFn) => Promise<U>,
     actionInternal: string | object,
     parentIdChain: (string | number)[],
     depth: number,
@@ -311,18 +312,19 @@ const createMeasureImpl = (prefix?: string, counterRef?: { value: number }, scop
     }, prefix);
 
     const measureForNextLevel = createNestedResolver(true, fullIdChain, childCounterRef, depth, _measureInternal, prefix, effectiveMaxLen);
+    const measureSyncForNextLevel = createNestedResolver(false, fullIdChain, childCounterRef, depth, _measureInternalSync, prefix, effectiveMaxLen);
 
     try {
       let result: U;
       if (timeout && timeout > 0) {
         result = await Promise.race([
-          fnInternal(measureForNextLevel as MeasureFn),
+          fnInternal(measureForNextLevel as MeasureFn, measureSyncForNextLevel as MeasureSyncFn),
           new Promise<never>((_, reject) =>
             setTimeout(() => reject(new Error(`Timeout (${formatDuration(timeout)})`)), timeout)
           ),
         ]);
       } else {
-        result = await fnInternal(measureForNextLevel as MeasureFn);
+        result = await fnInternal(measureForNextLevel as MeasureFn, measureSyncForNextLevel as MeasureSyncFn);
       }
       const duration = performance.now() - start;
       emit({ type: 'success', id: idStr, label, depth, duration, result, budget, maxResultLength: effectiveMaxLen }, prefix);
@@ -393,7 +395,7 @@ const createMeasureImpl = (prefix?: string, counterRef?: { value: number }, scop
 
   const measureFn = async <T = null>(
     arg1: string | object,
-    arg2?: ((measure: MeasureFn) => Promise<T>) | ((measure: MeasureFn) => T),
+    arg2?: ((measure: MeasureFn, measureSync: MeasureSyncFn) => Promise<T>) | ((measure: MeasureFn) => T),
     arg3?: (error: unknown) => any
   ): Promise<T | null> => {
     if (typeof arg2 === 'function') {
