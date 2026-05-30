@@ -165,6 +165,7 @@ const emit = (event: MeasureEvent, prefix?: string) => {
   defaultLogger(event, prefix);
 };
 
+
 const defaultLogger = (event: MeasureEvent, prefix?: string) => {
   const pfx = prefix ? `${prefix}:` : '';
   const id = `[${pfx}${event.id}]`;
@@ -175,7 +176,7 @@ const defaultLogger = (event: MeasureEvent, prefix?: string) => {
       console.log(`${t}${id} ... ${event.label}${formatMeta(event.meta)}`);
       break;
     case 'success': {
-      const endLabel = dotEndLabel ? dotChar.repeat(event.label.length) : event.label;
+      const endLabel = dotEndLabel ? dotChar.repeat(event.label.length + 5) : `    ${event.label}`;
       const resultStr = event.result !== undefined ? safeStringify(event.result, event.maxResultLength) : '';
       const arrow = resultStr ? ` → ${resultStr}` : '';
       const budgetWarn = event.budget && event.duration! > event.budget
@@ -185,7 +186,8 @@ const defaultLogger = (event: MeasureEvent, prefix?: string) => {
       break;
     }
     case 'error': {
-      const endLabel = dotEndLabel ? dotChar.repeat(event.label.length) : event.label;
+      // Added + 3 to the repeat count because ' ✗ ' takes up 3 characters, needing 5 total to match ' ... '
+      const endLabel = dotEndLabel ? dotChar.repeat(event.label.length + 3) : `  ${event.label}`;
       const errorMsg = event.error instanceof Error ? event.error.message : String(event.error);
       const budgetWarn = event.budget && event.duration! > event.budget
         ? ` ⚠ OVER BUDGET (${formatDuration(event.budget)})`
@@ -208,6 +210,7 @@ const defaultLogger = (event: MeasureEvent, prefix?: string) => {
 };
 
 // ─── Types ───────────────────────────────────────────────────────────
+
 
 export type MeasureFn = {
   <U>(label: string | object, fn: () => Promise<U>): Promise<U | null>;
