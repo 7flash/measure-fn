@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <b>Replace try-catch + timing boilerplate in TypeScript with a single line of code.</b>
+  <b>Scoped timing, structured result logging, and automatic nested traces for TypeScript functions.</b>
 </p>
 
 <p align="center">
@@ -12,252 +12,297 @@
   <a href="https://github.com/7flash/measure-fn/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License"></a>
 </p>
 
-Whenever a function needs error handling so it doesn't crash, and timing so you know how long it took, you usually end up adding this boilerplate manually:
+`measure-fn` wraps function calls with timing logs, scoped trace IDs, nested spans, budgets, retries, batches, and explicit error recovery.
 
-**Before:**
+```ts
+import { createMeasure } from 'measure-fn';
 
-```typescript
-let users = null;
-try {
-  const start = performance.now();
-  users = await fetchUsers();
-  const ms = (performance.now() - start).toFixed(2);
-  console.log(`[a] ··········· ${ms}ms → ${JSON.stringify(users)}`);
-} catch (e) {
-  console.log(`[a] ✗ Fetch users (${e.message})`);
-  console.error(e.stack);
-}
+const app = createMeasure('app');
+
+const users = await app.measure('Fetch users', () => fetchUsers());
 ```
 
-**After:** measure-fn does the exact same thing in one line. Completely type-safe (infers `T | null`) and never crashes.
-
-```typescript
-import { measure } from 'measure-fn';
-
-const users = await measure('Fetch users', () => fetchUsers());
-// → [a] ··········· 86ms → [{"id":1},{"id":2}]
+```txt
+[app:a] ... Fetch users
+[app:a] ··········· 86.24ms → [{"id":1},{"id":2}]
 ```
 
 ## Installation
 
 ```sh
 npm install measure-fn
-# or bun add / pnpm add / yarn add
+# or
+bun add measure-fn
+pnpm add measure-fn
+yarn add measure-fn
 ```
 
-## ✨ Defaults
+## Core model
 
-Every `measure` call automatically:
+Create a scoped instance and use it everywhere inside that scope:
 
-- 🛡️ **Catches errors** → logs `✗` with a stack trace and returns `null` (no unhandled rejections)
-- ⏱️ **Logs timing** → prints `label Nms → result` using `performance.now()`
-- 🌳 **Assigns a trace ID** → `[a]`, `[b]`, `[a-a]` for zero-config nested hierarchy
+```ts
+import { createMeasure } from 'measure-fn';
 
-## 🌳 Nested Calls (Tracing)
-
-Pass a child `m` function to get hierarchical APM-like tracing for free:
-
-```typescript
-await measure('Pipeline', async (m) => {
-  const user = await m('Fetch user', () => fetchUser(1));
-  const posts = await m('Fetch posts', () => fetchPosts(user.id));
-  return posts;
-});
-```
-
-```
-[a] ... Pipeline
-[a-a] ·········· 82ms → {"id":1}
-[a-b] ··········· 45ms → [...]
-[a] ········ 128ms
-```
-
-Parallel execution works cleanly too:
-
-```typescript
-await measure('Load all', async (m) => {
-  const [users, posts] = await Promise.all([
-    m('Users', () => fetchUsers()),
-    m('Posts', () => fetchPosts()),
-  ]);
-});
-```
-
-## 🛡️ Error Handling
-
-By default, errors return `null` so your pipelines can continue safely:
-
-```typescript
-const user = await measure('Fetch user', () => fetchUser(1));
-// If it throws → logs ✗, user = null
-```
-
-**Custom Fallbacks:** Pass `onError` as the 3rd argument:
-
-```typescript
-const user = await measure('Fetch user', () => fetchUser(1),
-  (error) => defaultUser
-);
-// If it throws → logs ✗, user = defaultUser
-```
-
-If the `onError` fallback itself throws, that's also safely caught and returns `null`. measure never crashes.
-
-**Fail-Fast (`.assert`):** Use `.assert()` when you need a guaranteed non-null result:
-
-```typescript
-const user = await measure.assert('Get user', () => fetchUser(1));
-// If it throws → logs ✗, re-throws with .cause = original error
-```
-
-| Pattern | On error | Return Type |
-|---------|----------|-------------|
-| `measure(label, fn)` | returns `null` | `T \| null` |
-| `measure(label, fn, onError)` | returns `onError(error)` | `T` |
-| `measure.assert(label, fn)` | throws with `.cause` | `T` |
-
-## 🚦 Timeouts & Budgets
-
-The first argument can be a label string, or an options object:
-
-| Field | Type | Effect |
-|-------|------|--------|
-| `label` | `string` | Display name (required if object) |
-| `timeout` | `number` | Aborts after N ms (returns `null`) |
-| `budget` | `number` | Warns if slower than N ms (doesn't abort) |
-| `maxResultLength` | `number` | Override result truncation (0 = unlimited, inherits to children) |
-| any other | `any` | Logged inline as context metadata |
-
-**Timeout** (enforce):
-
-```typescript
-const data = await measure({ label: 'Slow API', timeout: 5000 }, () => fetchSlowApi());
-// > 5s → ✗ Slow API 5.0s (Timeout (5.0s)), returns null
-```
-
-Works with `onError` fallback too.
-
-**Budget** (warn):
-
-```typescript
-await measure({ label: 'DB query', budget: 100 }, () => db.query('...'));
-// → [a] ········ 245ms → [...] ⚠ OVER BUDGET (100ms)
-```
-
-Combine both — budget warns early, timeout enforces a hard stop:
-
-```typescript
-await measure({ label: 'Query', budget: 100, timeout: 5000 }, () => query());
-```
-
-**Metadata context:**
-
-```typescript
-await measure({ label: 'Fetch user', userId: 1 }, () => fetchUser(1));
-// → [a] ... Fetch user (userId=1)
-```
-
-## 🧰 Extensions
-
-### `measure.wrap(label, fn)`
-
-Wrap a function once, measure every time it's called:
-
-```typescript
-const getUser = measure.wrap('Get user', fetchUser);
-await getUser(1);  // → [a] ········ 82ms
-await getUser(2);  // → [b] ········ 75ms
-```
-
-### `measure.batch(label, items, fn, opts?)`
-
-Process arrays with built-in progress logs:
-
-```typescript
-const results = await measure.batch('Process', userIds, async (id) => {
-  return await processUser(id);
-}, { every: 100 });
-// → [a] ... Process (500 items)
-// → [a] = 100/500 (1.2s, 83/s)
-// → [a] ················· 5.3s → "500/500 ok"
-```
-
-### `measure.retry(label, opts, fn)`
-
-Automatic retries with delay and backoff:
-
-```typescript
-const result = await measure.retry('Flaky API', {
-  attempts: 3, delay: 1000, backoff: 2
-}, () => fetchFlakyApi());
-// → [a] ✗ Flaky API [1/3] 102ms (timeout)
-// → [b] ················· 89ms → {"status":"ok"}
-```
-
-### `measure.timed(label, fn?)`
-
-Get duration programmatically alongside the result:
-
-```typescript
-const { result, duration } = await measure.timed('Fetch', () => fetchUsers());
-```
-
-### `createMeasure(prefix)`
-
-Scoped instances with custom prefixes:
-
-```typescript
 const api = createMeasure('api');
-const db = createMeasure('db');
 
-await api.measure('GET /users', async () => {
-  return await db.measure('SELECT', () => query('...'));
+await api.measure('GET /users req_abc123', async () => {
+  const users = await api.measure('SELECT users', () => db.users.findMany());
+  const body = await api.measure('Serialize response', () => JSON.stringify(users));
+
+  return new Response(body, { status: 200 });
 });
-// → [api:a] ... GET /users
-// → [db:a] ······ 44ms
-// → [api:a] ·········· 45ms
 ```
 
-### Annotations & Sync
-
-```typescript
-import { measureSync } from 'measure-fn';
-
-const config = measureSync('Parse config', () => JSON.parse(raw));
-
-await measure('Server ready');
-// → [a] = Server ready
+```txt
+[api:a] ... GET /users req_abc123
+[api:a-a] ... SELECT users
+[api:a-a] ··········· 30.43ms → [{"id":1},{"id":2}]
+[api:a-b] ... Serialize response
+[api:a-b] ··········· 0.10ms → "[{\"id\":1},{\"id\":2}]"
+[api:a] ··········· 31.02ms → {}
 ```
 
-## ⚙️ Configuration
+Nested IDs are automatic. No child `m` function is injected into your callback. Just call the same scoped instance again.
 
-```typescript
+## Defaults
+
+Every measured call:
+
+- logs a start line
+- logs duration on success
+- prints the returned value by default
+- throws the original error by default
+- supports explicit recovery with `catch`
+- assigns IDs like `[app:a]`, `[app:a-a]`, `[app:a-b]`
+
+Errors do **not** return `null` by default. This is intentional.
+
+## Start and end mappers
+
+Use a string for simple labels:
+
+```ts
+await app.measure('DB query', () => db.query());
+```
+
+Use `start()` and `end(result)` for concise structured output:
+
+```ts
+const response = await api.measure(
+  {
+    start: () => `GET /users ${requestId}`,
+    end: (res: Response) => ({ status: res.status }),
+  },
+  () => handleRequest(),
+);
+```
+
+`end(result)` only changes what is printed. The original result is returned unchanged.
+
+## Error handling
+
+By default, errors are logged and re-thrown:
+
+```ts
+await app.measure('Fetch user', () => fetchUser(1));
+```
+
+Recover explicitly with `catch(error)`:
+
+```ts
+const user = await app.measure(
+  {
+    start: () => 'Fetch user',
+    catch: () => ({ id: 0, name: 'Guest' }),
+  },
+  () => fetchUser(1),
+);
+```
+
+For request handlers:
+
+```ts
+const response = await api.measure(
+  {
+    start: () => `GET /users ${requestId}`,
+    end: (res: Response) => ({ status: res.status }),
+    catch: (error) =>
+      new Response(
+        error instanceof Error ? error.message : String(error),
+        { status: 500 },
+      ),
+  },
+  () => handleRequest(),
+);
+```
+
+| Pattern | On error | Return type |
+|---|---|---|
+| `measure(action, fn)` | throws original error | `T` |
+| `measure({ catch }, fn)` | returns `catch(error)` | `T` |
+| `measureSync(action, fn)` | throws original error | `T` |
+| `measureSync({ catch }, fn)` | returns `catch(error)` | `T` |
+
+## Timeouts and budgets
+
+```ts
+await app.measure(
+  {
+    start: () => 'Slow API',
+    timeout: 5000,
+    budget: 100,
+  },
+  () => fetchSlowApi(),
+);
+```
+
+- `timeout` rejects if the function takes longer than N ms.
+- `budget` only warns when duration is over N ms.
+
+Recover from timeout explicitly:
+
+```ts
+const result = await app.measure(
+  {
+    start: () => 'Slow API',
+    timeout: 5000,
+    catch: () => null,
+  },
+  () => fetchSlowApi(),
+);
+```
+
+## Result truncation
+
+```ts
+import { configure } from 'measure-fn';
+
+configure({ maxResultLength: 200 });
+```
+
+Per-call override:
+
+```ts
+await app.measure(
+  {
+    start: () => 'Large result',
+    maxResultLength: 80,
+  },
+  () => loadLargeObject(),
+);
+```
+
+Use `0` for unlimited output.
+
+## Sync API
+
+```ts
+const config = app.measureSync('Parse config', () => JSON.parse(raw));
+```
+
+Nested sync spans work the same way:
+
+```ts
+app.measureSync('Build report', () => {
+  const raw = app.measureSync('Parse CSV', () => 'a,b\n1,2');
+  const rows = app.measureSync('Split rows', () => raw.split('\n'));
+  return { rows };
+});
+```
+
+## Annotations
+
+```ts
+await app.measure('Server ready');
+app.measure.note('Cache warmed');
+
+app.measureSync('Config loaded');
+app.measureSync.note('CLI ready');
+```
+
+```txt
+[app:a] = Server ready
+```
+
+## Helpers
+
+### `measure.wrap(action, fn)`
+
+```ts
+const getUser = app.measure.wrap('Get user', fetchUser);
+
+await getUser(1);
+await getUser(2);
+```
+
+### `measure.retry(action, opts, fn)`
+
+```ts
+const result = await app.measure.retry(
+  'Flaky API',
+  { attempts: 3, delay: 1000, backoff: 2 },
+  () => fetchFlakyApi(),
+);
+```
+
+If all attempts fail, the last error is thrown unless the top-level action has `catch`.
+
+### `measure.batch(action, items, fn, opts?)`
+
+```ts
+const results = await app.measure.batch(
+  'Fetch users',
+  userIds,
+  (id) => fetchUser(id),
+  { every: 100 },
+);
+```
+
+Item errors are recorded as `null` and the batch continues.
+
+### `measure.timed(action, fn)`
+
+```ts
+const { result, duration } = await app.measure.timed('Fetch', () => fetchUsers());
+const sync = app.measureSync.timed('Parse', () => JSON.parse(raw));
+```
+
+## Configuration
+
+```ts
 import { configure } from 'measure-fn';
 
 configure({
-  silent: true,            // suppress all output
-  timestamps: true,        // prepend [HH:MM:SS.mmm]
-  maxResultLength: 200,    // truncate results (default: 0 = unlimited)
-  dotEndLabel: false,      // show full label on end lines (default: true = dots)
-  dotChar: '.',            // character for dot fill (default: '·')
-  logger: (event) => {     // custom event handler
-    myTelemetry.track(event);
-  }
+  silent: false,
+  maxResultLength: 200,
+  dotEndLabel: true,
+  dotChar: '·',
+  logger: null,
 });
 ```
 
-Env vars: `MEASURE_SILENT=1`, `MEASURE_TIMESTAMPS=1`
+Environment:
 
-## Output Format
+```sh
+MEASURE_SILENT=1
+```
 
-| Symbol | Meaning | Example |
-|--------|---------|---------|
-| `...` | Started | `[a] ... Fetch users` |
-| `···` | Success | `[a] ··········· 86ms → [...]` |
-| `✗` | Error | `[a] ✗ ··········· (Network Error)` |
-| `=` | Annotation | `[a] = Server ready` |
+## Custom logger
 
-IDs encode hierarchy: `[a]` → root, `[a-a]` → first child, `[a-b]` → second child.
+```ts
+configure({
+  logger(event) {
+    telemetry.track(event);
+  },
+});
+```
+
+The logger receives structured `MeasureLogEvent` objects for `start`, `success`, `error`, and `annotation`.
+
+## Runtime support
+
+`measure-fn` uses `node:async_hooks` for async-local nesting. It works in Node.js and Bun.
 
 ## License
 
