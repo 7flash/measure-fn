@@ -9,9 +9,11 @@ function captureConsole() {
     logs.push(args.map(String).join(" "));
   });
 
-  const errorSpy = spyOn(console, "error").mockImplementation((...args: any[]) => {
-    errors.push(args.map(String).join(" "));
-  });
+  const errorSpy = spyOn(console, "error").mockImplementation(
+    (...args: any[]) => {
+      errors.push(args.map(String).join(" "));
+    },
+  );
 
   return {
     logs,

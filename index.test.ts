@@ -17,9 +17,11 @@ function captureConsole() {
     logs.push(args.map(String).join(" "));
   });
 
-  const errorSpy = spyOn(console, "error").mockImplementation((...args: any[]) => {
-    errors.push(args.map(String).join(" "));
-  });
+  const errorSpy = spyOn(console, "error").mockImplementation(
+    (...args: any[]) => {
+      errors.push(args.map(String).join(" "));
+    },
+  );
 
   return {
     logs,
@@ -378,7 +380,10 @@ describe("helpers", () => {
 
   test("timed returns result and duration", async () => {
     const out = captureConsole();
-    const { result, duration } = await app.measure.timed("Timed", async () => 42);
+    const { result, duration } = await app.measure.timed(
+      "Timed",
+      async () => 42,
+    );
     out.restore();
 
     expect(result).toBe(42);
@@ -393,8 +398,16 @@ describe("custom logger", () => {
 
     await app.measure("Op", async () => 42);
 
-    expect(events[0]).toMatchObject({ type: "start", id: "app:a", label: "Op" });
-    expect(events[1]).toMatchObject({ type: "success", id: "app:a", result: 42 });
+    expect(events[0]).toMatchObject({
+      type: "start",
+      id: "app:a",
+      label: "Op",
+    });
+    expect(events[1]).toMatchObject({
+      type: "success",
+      id: "app:a",
+      result: 42,
+    });
   });
 
   test("silent suppresses logger", async () => {

@@ -306,7 +306,9 @@ async function bunServeExample() {
   console.log(`  catch pattern (ok): ${r1ok.status} ${await r1ok.text()}`);
 
   const r1fail = await fetch(`http://localhost:${server1.port}/fail`);
-  console.log(`  catch pattern (fail): ${r1fail.status} ${await r1fail.text()}`);
+  console.log(
+    `  catch pattern (fail): ${r1fail.status} ${await r1fail.text()}`,
+  );
 
   const r2ok = await fetch(`http://localhost:${server2.port}/hello`);
   console.log(`  throw pattern (ok): ${r2ok.status} ${await r2ok.text()}`);

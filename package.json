@@ -3,7 +3,7 @@
   "module": "index.ts",
   "main": "./index.ts",
   "types": "./index.ts",
-  "version": "4.0.5",
+  "version": "5.0.0",
   "type": "module",
   "private": false,
   "description": "Zero-dependency function performance measurement with hierarchical logging",

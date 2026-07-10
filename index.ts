@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 // ─── Context Storage ─────────────────────────────────────────────────
 
 type ContextStorage<TStore> = {
@@ -17,9 +19,6 @@ class StackContextStorage<TStore> implements ContextStorage<TStore> {
     this.current = store;
 
     try {
-      // Browser fallback is intentionally sync-stack only. Browsers do not have
-      // AsyncLocalStorage, and keeping one global context alive across awaits
-      // makes overlapping timers/polls nest into each other forever.
       return fn();
     } finally {
       this.current = previous;
@@ -27,34 +26,8 @@ class StackContextStorage<TStore> implements ContextStorage<TStore> {
   }
 }
 
-const getNativeAsyncLocalStorage = ():
-  | (new <T>() => ContextStorage<T>)
-  | undefined => {
-  try {
-    // Keep this dynamic so browser bundlers do not include node:async_hooks.
-    // eslint-disable-next-line no-new-func
-    const getRequire = new Function(
-      "try { return typeof require === 'function' ? require : undefined; } catch { return undefined; }",
-    ) as () => ((id: string) => any) | undefined;
-
-    const req = getRequire();
-    if (!req) return undefined;
-
-    const mod = req("node:async_hooks");
-    const AsyncLocalStorage = mod?.AsyncLocalStorage;
-
-    return typeof AsyncLocalStorage === "function"
-      ? AsyncLocalStorage
-      : undefined;
-  } catch {
-    return undefined;
-  }
-};
-
 const createContextStorage = <TStore>(): ContextStorage<TStore> => {
-  const AsyncLocalStorage = getNativeAsyncLocalStorage();
-
-  if (AsyncLocalStorage) {
+  if (typeof AsyncLocalStorage === "function") {
     return new AsyncLocalStorage<TStore>();
   }
 
@@ -73,88 +46,6 @@ const toAlpha = (num: number): string => {
   } while (n >= 0);
 
   return result;
-};
-
-// ─── Safe Stringify ──────────────────────────────────────────────────
-
-let maxResultLen = 0;
-
-export const safeStringify = (value: unknown, limit?: number): string => {
-  const cap = limit ?? maxResultLen;
-
-  if (value === undefined) return "";
-  if (value === null) return "null";
-
-  if (typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-
-  if (typeof value === "bigint") {
-    return `${value}n`;
-  }
-
-  if (typeof value === "function") {
-    return `[Function: ${value.name || "anonymous"}]`;
-  }
-
-  if (typeof value === "symbol") {
-    return value.toString();
-  }
-
-  if (typeof value === "string") {
-    const quoted = JSON.stringify(value);
-
-    if (cap === 0) return quoted;
-
-    return quoted.length > cap
-      ? quoted.slice(0, Math.max(0, cap - 1)) + '…"'
-      : quoted;
-  }
-
-  try {
-    const seen = new WeakSet<object>();
-
-    const str = JSON.stringify(value, (_key, val) => {
-      if (typeof val === "bigint") {
-        return `${val}n`;
-      }
-
-      if (typeof val === "function") {
-        return `[Function: ${val.name || "anonymous"}]`;
-      }
-
-      if (typeof val === "symbol") {
-        return val.toString();
-      }
-
-      if (typeof val === "object" && val !== null) {
-        if (seen.has(val)) return "[Circular]";
-        seen.add(val);
-      }
-
-      return val;
-    });
-
-    if (cap === 0) return str;
-
-    return str.length > cap
-      ? str.slice(0, Math.max(0, cap)) + "…"
-      : str;
-  } catch {
-    return String(value);
-  }
-};
-
-// ─── Duration Formatting ─────────────────────────────────────────────
-
-export const formatDuration = (ms: number): string => {
-  if (ms < 1000) return `${ms.toFixed(2)}ms`;
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
-
-  const mins = Math.floor(ms / 60000);
-  const secs = Math.round((ms % 60000) / 1000);
-
-  return `${mins}m ${secs}s`;
 };
 
 // ─── Types ───────────────────────────────────────────────────────────
@@ -179,10 +70,15 @@ export interface MeasureActionObject<T = unknown> {
 
   /** Optional per-measure result print cap. */
   maxResultLength?: number;
+
+  /** Override global auto-summary behavior for this measure. */
+  summarize?: boolean;
+
+  /** Override global prefix stripping behavior for this measure. */
+  stripScopePrefix?: boolean;
 }
 
 export type MeasureAction<T = unknown> = string | MeasureActionObject<T>;
-
 type AnyMeasureAction = MeasureAction<any>;
 
 export type MeasureLogEvent =
@@ -233,6 +129,30 @@ export type ConfigureOpts = {
   silent?: boolean;
   logger?: ((event: MeasureLogEvent) => void) | null;
   maxResultLength?: number;
+
+  /** Accepted for compatibility. Current default logger is always compact. */
+  timestamps?: boolean;
+
+  /** Auto-summarize measured results before printing/logging. */
+  summarize?: boolean;
+
+  /** Strip duplicated scope prefixes from labels, e.g. solard:start -> start. */
+  stripScopePrefix?: boolean;
+
+  /** Redact object keys matching this pattern during summary/stringify. */
+  sensitiveKeyPattern?: RegExp | string | null;
+
+  /** Maximum recursive depth for auto-summary. */
+  maxSummaryDepth?: number;
+
+  /** String truncation length used by auto-summary. */
+  maxSummaryStringLength?: number;
+
+  /** Number of array items included in auto-summary samples. */
+  summaryArraySample?: number;
+
+  /** Number of object keys included in auto-summary. */
+  summaryObjectKeys?: number;
 };
 
 export type TimedResult<T> = {
@@ -256,12 +176,31 @@ export type BatchSummary<R> = {
   results: (R | null)[];
 };
 
+export type MeasureSyncFn = {
+  <T>(action: MeasureAction<T>, fn: () => T): T;
+  (action: MeasureAction): null;
+
+  root<T>(action: MeasureAction<T>, fn: () => T): T;
+  root(action: MeasureAction): null;
+
+  note<T = unknown>(action: MeasureAction<T>): void;
+
+  timed<T>(action: MeasureAction<T>, fn: () => T): TimedResult<T>;
+
+  wrap<A extends unknown[], R>(
+    action: MeasureAction<R>,
+    fn: (...args: A) => R,
+  ): (...args: A) => R;
+};
+
 export type MeasureFn = {
   <T>(action: MeasureAction<T>, fn: () => MaybePromise<T>): Promise<T>;
   (action: MeasureAction): Promise<null>;
 
   root<T>(action: MeasureAction<T>, fn: () => MaybePromise<T>): Promise<T>;
   root(action: MeasureAction): Promise<null>;
+
+  sync: MeasureSyncFn;
 
   note<T = unknown>(action: MeasureAction<T>): void;
 
@@ -287,45 +226,260 @@ export type MeasureFn = {
     fn: (item: T, index: number) => Promise<R>,
     opts?: BatchOpts,
   ): Promise<(R | null)[]>;
-};
 
-export type MeasureSyncFn = {
-  <T>(action: MeasureAction<T>, fn: () => T): T;
-  (action: MeasureAction): null;
-
-  root<T>(action: MeasureAction<T>, fn: () => T): T;
-  root(action: MeasureAction): null;
-
-  note<T = unknown>(action: MeasureAction<T>): void;
-
-  timed<T>(action: MeasureAction<T>, fn: () => T): TimedResult<T>;
-
-  wrap<A extends unknown[], R>(
-    action: MeasureAction<R>,
-    fn: (...args: A) => R,
-  ): (...args: A) => R;
-};
-
-export type MeasureInstance = {
+  /** Backward-compatible alias. */
   measure: MeasureFn;
+
+  /** Backward-compatible alias. */
   measureSync: MeasureSyncFn;
+
   resetCounter: () => void;
 };
 
+export type MeasureInstance = MeasureFn;
+
 // ─── Configuration ───────────────────────────────────────────────────
+
+const DEFAULT_SENSITIVE_KEY =
+  /secret|private|mnemonic|seed|keypair|password|authorization|cookie|token|apikey|api_key/i;
+
+const options = {
+  timestamps: false,
+  summarize: false,
+  stripScopePrefix: false,
+  maxSummaryDepth: 4,
+  maxSummaryStringLength: 160,
+  summaryArraySample: 2,
+  summaryObjectKeys: 24,
+  sensitiveKeyPattern: DEFAULT_SENSITIVE_KEY as RegExp | null,
+};
 
 export let silent =
   typeof process !== "undefined" &&
-  (process.env.MEASURE_SILENT === "1" ||
-    process.env.MEASURE_SILENT === "true");
+  (process.env.MEASURE_SILENT === "1" || process.env.MEASURE_SILENT === "true");
 
 export let logger: ((event: MeasureLogEvent) => void) | null = null;
-
+let maxResultLen = 0;
 
 export const configure = (opts: ConfigureOpts) => {
   if (opts.silent !== undefined) silent = opts.silent;
   if (opts.logger !== undefined) logger = opts.logger;
-  if (opts.maxResultLength !== undefined) maxResultLen = opts.maxResultLength;
+  if (opts.maxResultLength !== undefined) {
+    maxResultLen = Number.isFinite(opts.maxResultLength)
+      ? Math.max(0, Number(opts.maxResultLength))
+      : maxResultLen;
+  }
+
+  if (opts.timestamps !== undefined) options.timestamps = opts.timestamps;
+  if (opts.summarize !== undefined) options.summarize = opts.summarize;
+  if (opts.stripScopePrefix !== undefined) {
+    options.stripScopePrefix = opts.stripScopePrefix;
+  }
+  if (opts.maxSummaryDepth !== undefined) {
+    options.maxSummaryDepth = Math.max(0, Number(opts.maxSummaryDepth));
+  }
+  if (opts.maxSummaryStringLength !== undefined) {
+    options.maxSummaryStringLength = Math.max(
+      0,
+      Number(opts.maxSummaryStringLength),
+    );
+  }
+  if (opts.summaryArraySample !== undefined) {
+    options.summaryArraySample = Math.max(0, Number(opts.summaryArraySample));
+  }
+  if (opts.summaryObjectKeys !== undefined) {
+    options.summaryObjectKeys = Math.max(0, Number(opts.summaryObjectKeys));
+  }
+  if (opts.sensitiveKeyPattern !== undefined) {
+    if (opts.sensitiveKeyPattern == null) {
+      options.sensitiveKeyPattern = null;
+    } else if (typeof opts.sensitiveKeyPattern === "string") {
+      options.sensitiveKeyPattern = new RegExp(opts.sensitiveKeyPattern, "i");
+    } else {
+      options.sensitiveKeyPattern = opts.sensitiveKeyPattern;
+    }
+  }
+};
+
+// ─── Safe Stringify / Summary ────────────────────────────────────────
+
+export const summarizeForMeasure = (
+  value: unknown,
+  depth = 0,
+  seen = new WeakSet<object>(),
+): unknown => {
+  if (value == null) return value;
+
+  if (depth >= options.maxSummaryDepth) {
+    return { type: typeof value, truncated: "max-depth" };
+  }
+
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "number" || typeof value === "boolean") return value;
+
+  if (typeof value === "string") {
+    const max = options.maxSummaryStringLength;
+    if (max === 0 || value.length <= max) return value;
+    const head = Math.max(0, Math.floor(max / 2));
+    const tail = Math.max(0, Math.min(24, max - head));
+    return `${value.slice(0, head)}…${value.slice(-tail)} (${value.length} chars)`;
+  }
+
+  if (typeof Response !== "undefined" && value instanceof Response) {
+    return { status: value.status, ok: value.ok };
+  }
+
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message,
+      cause:
+        value.cause == null
+          ? undefined
+          : summarizeForMeasure(value.cause, depth + 1, seen),
+    };
+  }
+
+  if (value instanceof Date) return value.toISOString();
+  if (typeof URL !== "undefined" && value instanceof URL)
+    return value.toString();
+
+  if (value instanceof Map) {
+    const entries = Array.from(value.entries())
+      .slice(0, options.summaryArraySample)
+      .map(([key, val]) => [
+        summarizeForMeasure(key, depth + 1, seen),
+        summarizeForMeasure(val, depth + 1, seen),
+      ]);
+
+    return { type: "map", size: value.size, sample: entries };
+  }
+
+  if (value instanceof Set) {
+    const sample = Array.from(value.values())
+      .slice(0, options.summaryArraySample)
+      .map((item) => summarizeForMeasure(item, depth + 1, seen));
+
+    return { type: "set", size: value.size, sample };
+  }
+
+  if (Array.isArray(value)) {
+    if (depth >= 2) return { type: "array", length: value.length };
+
+    if (value.length <= 8) {
+      return value.map((item) => summarizeForMeasure(item, depth + 1, seen));
+    }
+
+    return {
+      type: "array",
+      length: value.length,
+      sample: value
+        .slice(0, options.summaryArraySample)
+        .map((item) => summarizeForMeasure(item, depth + 1, seen)),
+    };
+  }
+
+  if (typeof value === "object") {
+    if (seen.has(value)) return "[Circular]";
+    seen.add(value);
+
+    const input = value as Record<string, unknown>;
+    const keys = Object.keys(input);
+    const isLarge = keys.length > options.summaryObjectKeys;
+    const out: Record<string, unknown> = isLarge
+      ? { type: "object", keys: keys.length }
+      : {};
+
+    for (const key of keys.slice(0, options.summaryObjectKeys)) {
+      if (options.sensitiveKeyPattern?.test(key)) {
+        out[key] = "[omitted]";
+        continue;
+      }
+
+      try {
+        const item = input[key];
+
+        if (Array.isArray(item) && item.length > 8) {
+          out[key] = { type: "array", length: item.length };
+          continue;
+        }
+
+        out[key] = summarizeForMeasure(item, depth + 1, seen);
+      } catch (error) {
+        out[key] = {
+          type: "unreadable",
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
+
+    if (keys.length > options.summaryObjectKeys) {
+      out.omittedKeys = keys.length - options.summaryObjectKeys;
+    }
+
+    return out;
+  }
+
+  return String(value);
+};
+
+export const safeStringify = (value: unknown, limit?: number): string => {
+  const cap = limit ?? maxResultLen;
+
+  if (value === undefined) return "";
+  if (value === null) return "null";
+
+  const input = options.summarize ? summarizeForMeasure(value) : value;
+
+  if (typeof input === "number" || typeof input === "boolean") {
+    return String(input);
+  }
+
+  if (typeof input === "bigint") return `${input}n`;
+  if (typeof input === "function")
+    return `[Function: ${input.name || "anonymous"}]`;
+  if (typeof input === "symbol") return input.toString();
+
+  if (typeof input === "string") {
+    const quoted = JSON.stringify(input);
+    if (cap === 0) return quoted;
+    return quoted.length > cap
+      ? quoted.slice(0, Math.max(0, cap - 1)) + '…"'
+      : quoted;
+  }
+
+  try {
+    const seen = new WeakSet<object>();
+
+    const str = JSON.stringify(input, (key, val) => {
+      if (key && options.sensitiveKeyPattern?.test(key)) return "[omitted]";
+      if (typeof val === "bigint") return `${val}n`;
+      if (typeof val === "function")
+        return `[Function: ${val.name || "anonymous"}]`;
+      if (typeof val === "symbol") return val.toString();
+      if (typeof val === "object" && val !== null) {
+        if (seen.has(val)) return "[Circular]";
+        seen.add(val);
+      }
+      return val;
+    });
+
+    if (cap === 0) return str;
+    return str.length > cap ? str.slice(0, Math.max(0, cap)) + "…" : str;
+  } catch {
+    return String(input);
+  }
+};
+
+// ─── Duration Formatting ─────────────────────────────────────────────
+
+export const formatDuration = (ms: number): string => {
+  if (ms < 1000) return `${ms.toFixed(2)}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+
+  const mins = Math.floor(ms / 60000);
+  const secs = Math.round((ms % 60000) / 1000);
+  return `${mins}m ${secs}s`;
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────
@@ -362,10 +516,55 @@ const getCatch = <T>(
   return action.catch;
 };
 
-const formatLabelValue = (value: unknown): string => {
-  if (typeof value === "string") return value;
-  if (value === undefined) return "";
-  return safeStringify(value, 0);
+const shouldSummarize = (action: AnyMeasureAction): boolean => {
+  if (isActionObject(action) && action.summarize !== undefined) {
+    return action.summarize;
+  }
+  return options.summarize;
+};
+
+const shouldStripScopePrefix = (action: AnyMeasureAction): boolean => {
+  if (isActionObject(action) && action.stripScopePrefix !== undefined) {
+    return action.stripScopePrefix;
+  }
+  return options.stripScopePrefix;
+};
+
+const stripRedundantPrefix = (
+  scope: string | undefined,
+  label: string,
+): string => {
+  if (!scope) return label;
+
+  const exactScopePrefix = `${scope}:`;
+  if (label.startsWith(exactScopePrefix)) {
+    return label.slice(exactScopePrefix.length);
+  }
+
+  const rootScope = scope.split(":")[0];
+  if (rootScope && label.startsWith(`${rootScope}:`)) {
+    return label.slice(rootScope.length + 1);
+  }
+
+  return label;
+};
+
+const formatLabelValue = (
+  scope: string | undefined,
+  action: AnyMeasureAction,
+  value: unknown,
+): string => {
+  let normalized = value;
+
+  if (typeof normalized === "string" && shouldStripScopePrefix(action)) {
+    normalized = stripRedundantPrefix(scope, normalized);
+  } else if (shouldSummarize(action)) {
+    normalized = summarizeForMeasure(normalized);
+  }
+
+  if (typeof normalized === "string") return normalized;
+  if (normalized === undefined) return "";
+  return safeStringify(normalized, 0);
 };
 
 const getStartValue = (action: AnyMeasureAction): unknown => {
@@ -376,7 +575,8 @@ const getStartValue = (action: AnyMeasureAction): unknown => {
       return action.start();
     } catch (error) {
       return {
-        startMapperError: error instanceof Error ? error.message : String(error),
+        startMapperError:
+          error instanceof Error ? error.message : String(error),
       };
     }
   }
@@ -385,31 +585,29 @@ const getStartValue = (action: AnyMeasureAction): unknown => {
 };
 
 const getEndValue = <T>(action: MeasureAction<T>, result: T): unknown => {
+  let value: unknown = result;
+
   if (isActionObject(action) && typeof action.end === "function") {
     try {
-      return action.end(result);
+      value = action.end(result);
     } catch (error) {
-      return {
+      value = {
         resultMapperError:
           error instanceof Error ? error.message : String(error),
       };
     }
   }
 
-  return result;
+  return shouldSummarize(action) ? summarizeForMeasure(value) : value;
 };
 
 const timeoutPromise = (ms: number): Promise<never> => {
   return new Promise((_resolve, reject) => {
-    setTimeout(() => {
-      reject(new Error(`Timeout (${formatDuration(ms)})`));
-    }, ms);
+    setTimeout(() => reject(new Error(`Timeout (${formatDuration(ms)})`)), ms);
   });
 };
 
-const sleep = (ms: number) => {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-};
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ─── Default Logger ──────────────────────────────────────────────────
 
@@ -427,9 +625,7 @@ const defaultLogger = (event: MeasureLogEvent) => {
         event.result !== undefined
           ? safeStringify(event.result, event.maxResultLength)
           : "";
-
       const resultSuffix = resultStr ? ` → ${resultStr}` : "";
-
       const budgetWarn =
         event.budget !== undefined && event.duration > event.budget
           ? ` ⚠ over budget ${formatDuration(event.budget)}`
@@ -438,14 +634,14 @@ const defaultLogger = (event: MeasureLogEvent) => {
       console.log(
         `${id} ✓ ${formatDuration(event.duration)}${resultSuffix}${budgetWarn}`,
       );
-
       break;
     }
 
     case "error": {
       const errorMsg =
-        event.error instanceof Error ? event.error.message : String(event.error);
-
+        event.error instanceof Error
+          ? event.error.message
+          : String(event.error);
       const budgetWarn =
         event.budget !== undefined && event.duration > event.budget
           ? ` ⚠ over budget ${formatDuration(event.budget)}`
@@ -457,14 +653,10 @@ const defaultLogger = (event: MeasureLogEvent) => {
 
       if (event.error instanceof Error) {
         console.error(`${id}`, event.error.stack ?? event.error.message);
-
-        if (event.error.cause) {
-          console.error(`${id} Cause:`, event.error.cause);
-        }
+        if (event.error.cause) console.error(`${id} Cause:`, event.error.cause);
       } else {
         console.error(`${id}`, event.error);
       }
-
       break;
     }
 
@@ -483,31 +675,24 @@ type Span = {
   childCounter: number;
 };
 
-// This is intentionally shared by every createMeasure("scope") instance.
-// Scope says who logged the line. The shared span path says where the line
-// belongs in the current trace tree.
 const sharedStorage = createContextStorage<Span>();
 
 type RunOptions = {
   detached?: boolean;
 };
 
-const createMeasureImpl = (scope?: string): MeasureInstance => {
+const createMeasureImpl = (scope?: string): MeasureFn => {
   const storage = sharedStorage;
   const counter = { value: 0 };
 
-  const formatId = (rawId: string) => {
-    return scope ? `${scope}:${rawId}` : rawId;
-  };
+  const formatId = (rawId: string) => (scope ? `${scope}:${rawId}` : rawId);
 
   const emit = (event: MeasureLogEvent) => {
     if (silent) return;
-
     if (logger) {
       logger(event);
       return;
     }
-
     defaultLogger(event);
   };
 
@@ -515,15 +700,10 @@ const createMeasureImpl = (scope?: string): MeasureInstance => {
     const parent = detached ? undefined : storage.getStore();
 
     if (!parent) {
-      return {
-        id: toAlpha(counter.value++),
-        depth: 0,
-        childCounter: 0,
-      };
+      return { id: toAlpha(counter.value++), depth: 0, childCounter: 0 };
     }
 
     const childId = toAlpha(parent.childCounter++);
-
     return {
       id: `${parent.id}-${childId}`,
       depth: parent.depth + 1,
@@ -533,8 +713,8 @@ const createMeasureImpl = (scope?: string): MeasureInstance => {
 
   const note = <T = unknown>(action: MeasureAction<T>, opts?: RunOptions) => {
     const span = createSpan(opts?.detached === true);
-    const value = getStartValue(action);
-    const label = formatLabelValue(value);
+    const startValue = getStartValue(action);
+    const label = formatLabelValue(scope, action, startValue);
 
     emit({
       type: "annotation",
@@ -543,7 +723,7 @@ const createMeasureImpl = (scope?: string): MeasureInstance => {
       scope,
       depth: span.depth,
       label,
-      value,
+      value: startValue,
     });
   };
 
@@ -555,7 +735,7 @@ const createMeasureImpl = (scope?: string): MeasureInstance => {
     const span = createSpan(opts?.detached === true);
     const startedAt = performance.now();
     const startValue = getStartValue(action);
-    const label = formatLabelValue(startValue);
+    const label = formatLabelValue(scope, action, startValue);
     const budget = getBudget(action);
     const timeout = getTimeout(action);
     const maxResultLength = getMaxResultLength(action);
@@ -599,6 +779,9 @@ const createMeasureImpl = (scope?: string): MeasureInstance => {
         return result;
       } catch (error) {
         const duration = performance.now() - startedAt;
+        const printedError = shouldSummarize(action)
+          ? summarizeForMeasure(error)
+          : error;
 
         emit({
           type: "error",
@@ -608,17 +791,13 @@ const createMeasureImpl = (scope?: string): MeasureInstance => {
           depth: span.depth,
           label,
           duration,
-          error,
+          error: printedError,
           budget,
           maxResultLength,
         });
 
         const recover = getCatch(action);
-
-        if (recover) {
-          return await recover(error);
-        }
-
+        if (recover) return await recover(error);
         throw error;
       }
     });
@@ -632,7 +811,7 @@ const createMeasureImpl = (scope?: string): MeasureInstance => {
     const span = createSpan(opts?.detached === true);
     const startedAt = performance.now();
     const startValue = getStartValue(action);
-    const label = formatLabelValue(startValue);
+    const label = formatLabelValue(scope, action, startValue);
     const budget = getBudget(action);
     const maxResultLength = getMaxResultLength(action);
 
@@ -668,6 +847,9 @@ const createMeasureImpl = (scope?: string): MeasureInstance => {
         return result;
       } catch (error) {
         const duration = performance.now() - startedAt;
+        const printedError = shouldSummarize(action)
+          ? summarizeForMeasure(error)
+          : error;
 
         emit({
           type: "error",
@@ -677,20 +859,17 @@ const createMeasureImpl = (scope?: string): MeasureInstance => {
           depth: span.depth,
           label,
           duration,
-          error,
+          error: printedError,
           budget,
           maxResultLength,
         });
 
         const recover = getCatch(action);
-
         if (recover) {
           const result = recover(error);
-
           if (result && typeof (result as any).then === "function") {
             throw new Error("measureSync catch() must return synchronously");
           }
-
           return result as T;
         }
 
@@ -699,7 +878,38 @@ const createMeasureImpl = (scope?: string): MeasureInstance => {
     });
   };
 
-  const measureFn = (async <T>(
+  const sync = (<T>(action: MeasureAction<T>, fn?: () => T): T | null => {
+    if (typeof fn !== "function") {
+      note(action);
+      return null;
+    }
+    return runMeasuredSync(action, fn);
+  }) as MeasureSyncFn;
+
+  sync.root = (<T>(action: MeasureAction<T>, fn?: () => T): T | null => {
+    if (typeof fn !== "function") {
+      note(action, { detached: true });
+      return null;
+    }
+    return runMeasuredSync(action, fn, { detached: true });
+  }) as MeasureSyncFn["root"];
+
+  sync.note = note;
+
+  sync.timed = <T>(action: MeasureAction<T>, fn: () => T): TimedResult<T> => {
+    const start = performance.now();
+    const result = sync(action, fn);
+    return { result, duration: performance.now() - start };
+  };
+
+  sync.wrap = <A extends unknown[], R>(
+    action: MeasureAction<R>,
+    fn: (...args: A) => R,
+  ) => {
+    return (...args: A) => sync(action, () => fn(...args));
+  };
+
+  const m = (async <T>(
     action: MeasureAction<T>,
     fn?: () => MaybePromise<T>,
   ): Promise<T | null> => {
@@ -707,11 +917,10 @@ const createMeasureImpl = (scope?: string): MeasureInstance => {
       note(action);
       return null;
     }
-
     return await runMeasured(action, fn);
   }) as MeasureFn;
 
-  measureFn.root = (async <T>(
+  m.root = (async <T>(
     action: MeasureAction<T>,
     fn?: () => MaybePromise<T>,
   ): Promise<T | null> => {
@@ -719,26 +928,22 @@ const createMeasureImpl = (scope?: string): MeasureInstance => {
       note(action, { detached: true });
       return null;
     }
-
     return await runMeasured(action, fn, { detached: true });
   }) as MeasureFn["root"];
 
-  measureFn.note = note;
+  m.sync = sync;
+  m.note = note;
 
-  measureFn.timed = async <T>(
+  m.timed = async <T>(
     action: MeasureAction<T>,
     fn: () => MaybePromise<T>,
   ): Promise<TimedResult<T>> => {
     const start = performance.now();
-    const result = await measureFn(action, fn);
-
-    return {
-      result,
-      duration: performance.now() - start,
-    };
+    const result = await m(action, fn);
+    return { result, duration: performance.now() - start };
   };
 
-  measureFn.retry = async <T>(
+  m.retry = async <T>(
     action: MeasureAction<T>,
     opts: RetryOpts,
     fn: () => Promise<T>,
@@ -746,13 +951,11 @@ const createMeasureImpl = (scope?: string): MeasureInstance => {
     const attempts = opts.attempts ?? 3;
     const delay = opts.delay ?? 1000;
     const backoff = opts.backoff ?? 1;
-
     let lastError: unknown = null;
 
     for (let i = 0; i < attempts; i++) {
       const attempt = i + 1;
       const suffix = `[${attempt}/${attempts}]`;
-
       const attemptAction: MeasureAction<T> =
         typeof action === "string"
           ? `${action} ${suffix}`
@@ -761,39 +964,32 @@ const createMeasureImpl = (scope?: string): MeasureInstance => {
               catch: undefined,
               start: () => {
                 const value = getStartValue(action);
-                const label = formatLabelValue(value);
+                const label = formatLabelValue(scope, action, value);
                 return label ? `${label} ${suffix}` : suffix;
               },
             };
 
       try {
-        return await measureFn(attemptAction, fn);
+        return await m(attemptAction, fn);
       } catch (error) {
         lastError = error;
-
-        if (attempt < attempts) {
-          await sleep(delay * Math.pow(backoff, i));
-        }
+        if (attempt < attempts) await sleep(delay * Math.pow(backoff, i));
       }
     }
 
     const recover = getCatch(action);
-
-    if (recover) {
-      return await recover(lastError);
-    }
-
+    if (recover) return await recover(lastError);
     throw lastError;
   };
 
-  measureFn.wrap = <A extends unknown[], R>(
+  m.wrap = <A extends unknown[], R>(
     action: MeasureAction<R>,
     fn: (...args: A) => MaybePromise<R>,
   ) => {
-    return (...args: A) => measureFn(action, () => fn(...args));
+    return (...args: A) => m(action, () => fn(...args));
   };
 
-  measureFn.batch = async <T, R>(
+  m.batch = async <T, R>(
     action: MeasureAction<BatchSummary<R>>,
     items: T[],
     fn: (item: T, index: number) => Promise<R>,
@@ -812,12 +1008,12 @@ const createMeasureImpl = (scope?: string): MeasureInstance => {
             ...action,
             start: () => {
               const value = getStartValue(action);
-              const label = formatLabelValue(value);
+              const label = formatLabelValue(scope, action, value);
               return label ? `${label} (${total} items)` : `${total} items`;
             },
           };
 
-    const summary = await measureFn(batchAction, async () => {
+    const summary = await m(batchAction, async () => {
       const results: (R | null)[] = [];
 
       for (let i = 0; i < items.length; i++) {
@@ -834,78 +1030,27 @@ const createMeasureImpl = (scope?: string): MeasureInstance => {
       }
 
       const ok = results.filter((result) => result !== null).length;
-
-      return {
-        ok,
-        total,
-        results,
-      };
+      return { ok, total, results };
     });
 
     return summary.results;
   };
 
-  const measureSyncFn = (<T>(
-    action: MeasureAction<T>,
-    fn?: () => T,
-  ): T | null => {
-    if (typeof fn !== "function") {
-      note(action);
-      return null;
-    }
-
-    return runMeasuredSync(action, fn);
-  }) as MeasureSyncFn;
-
-  measureSyncFn.root = (<T>(
-    action: MeasureAction<T>,
-    fn?: () => T,
-  ): T | null => {
-    if (typeof fn !== "function") {
-      note(action, { detached: true });
-      return null;
-    }
-
-    return runMeasuredSync(action, fn, { detached: true });
-  }) as MeasureSyncFn["root"];
-
-  measureSyncFn.note = note;
-
-  measureSyncFn.timed = <T>(
-    action: MeasureAction<T>,
-    fn: () => T,
-  ): TimedResult<T> => {
-    const start = performance.now();
-    const result = measureSyncFn(action, fn);
-
-    return {
-      result,
-      duration: performance.now() - start,
-    };
+  m.measure = m;
+  m.measureSync = sync;
+  m.resetCounter = () => {
+    counter.value = 0;
   };
 
-  measureSyncFn.wrap = <A extends unknown[], R>(
-    action: MeasureAction<R>,
-    fn: (...args: A) => R,
-  ) => {
-    return (...args: A) => measureSyncFn(action, () => fn(...args));
-  };
-
-  return {
-    measure: measureFn,
-    measureSync: measureSyncFn,
-    resetCounter: () => {
-      counter.value = 0;
-    },
-  };
+  return m;
 };
 
 // ─── Default Global Instance ─────────────────────────────────────────
 
 const globalInstance = createMeasureImpl();
 
-export const measure = globalInstance.measure;
-export const measureSync = globalInstance.measureSync;
+export const measure = globalInstance;
+export const measureSync = globalInstance.sync;
 
 // ─── Scoped Instances ────────────────────────────────────────────────
 

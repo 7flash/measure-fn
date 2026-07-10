@@ -1,9 +1,5 @@
 import { describe, test, expect, beforeEach } from "bun:test";
-import {
-  configure,
-  createMeasure,
-  type MeasureLogEvent,
-} from "./index.ts";
+import { configure, createMeasure, type MeasureLogEvent } from "./index.ts";
 
 let events: MeasureLogEvent[];
 
