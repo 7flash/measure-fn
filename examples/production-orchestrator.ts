@@ -26,6 +26,13 @@ type WorkerState = {
 
 const workers: WorkerName[] = ["server", "stream"];
 
+type StartWorkerResult = {
+  status: "already_ready" | "ready";
+  name: WorkerName;
+  pid: number | null;
+  alive?: boolean;
+};
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function getWorkerState(name: WorkerName): Promise<WorkerState> {
@@ -40,7 +47,7 @@ async function getWorkerState(name: WorkerName): Promise<WorkerState> {
   };
 }
 
-async function startWorker(name: WorkerName): Promise<WorkerState> {
+async function startWorker(name: WorkerName): Promise<StartWorkerResult> {
   return await m(`worker:${name}`, async () => {
     const before = await getWorkerState(name);
 

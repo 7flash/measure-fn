@@ -125,9 +125,27 @@ export type MeasureLogEvent =
       value: unknown;
     };
 
+export type MeasureLogNext = () => void;
+
+export type MeasureLogger = (
+  event: MeasureLogEvent,
+  next: MeasureLogNext,
+) => void;
+
 export type ConfigureOpts = {
   silent?: boolean;
-  logger?: ((event: MeasureLogEvent) => void) | null;
+
+  /**
+   * Optional log middleware.
+   *
+   * Call next() to preserve the built-in log output and add your own behavior.
+   * Omit next() to fully replace the built-in logger.
+   */
+  logger?: MeasureLogger | null;
+
+  /** Enable ANSI colors, disable them, or auto-detect terminal support. */
+  colors?: boolean | "auto";
+
   maxResultLength?: number;
 
   /** Accepted for compatibility. Current default logger is always compact. */
@@ -245,6 +263,7 @@ const DEFAULT_SENSITIVE_KEY =
 
 const options = {
   timestamps: false,
+  colors: "auto" as boolean | "auto",
   summarize: false,
   stripScopePrefix: false,
   maxSummaryDepth: 4,
@@ -258,12 +277,13 @@ export let silent =
   typeof process !== "undefined" &&
   (process.env.MEASURE_SILENT === "1" || process.env.MEASURE_SILENT === "true");
 
-export let logger: ((event: MeasureLogEvent) => void) | null = null;
+export let logger: MeasureLogger | null = null;
 let maxResultLen = 0;
 
 export const configure = (opts: ConfigureOpts) => {
   if (opts.silent !== undefined) silent = opts.silent;
   if (opts.logger !== undefined) logger = opts.logger;
+  if (opts.colors !== undefined) options.colors = opts.colors;
   if (opts.maxResultLength !== undefined) {
     maxResultLen = Number.isFinite(opts.maxResultLength)
       ? Math.max(0, Number(opts.maxResultLength))
@@ -611,12 +631,63 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ─── Default Logger ──────────────────────────────────────────────────
 
-const defaultLogger = (event: MeasureLogEvent) => {
+const ANSI_RESET = "\x1b[0m";
+const ANSI_DIM = 90;
+const ANSI_GREEN = 32;
+const ANSI_RED = 31;
+const ANSI_YELLOW = 33;
+const ANSI_CYAN = 36;
+
+const IDENTITY_COLORS = [36, 35, 34, 33, 32, 96, 95, 94, 93, 92] as const;
+
+const shouldUseColors = (): boolean => {
+  if (options.colors === true) return true;
+  if (options.colors === false) return false;
+
+  if (typeof process === "undefined") return false;
+  if (process.env.NO_COLOR !== undefined) return false;
+  if (process.env.FORCE_COLOR === "0") return false;
+  if (process.env.FORCE_COLOR !== undefined) return true;
+
+  return process.stdout?.isTTY === true;
+};
+
+const color = (code: number, value: string): string => {
+  if (!shouldUseColors()) return value;
+  return `\x1b[${code}m${value}${ANSI_RESET}`;
+};
+
+const stableHash = (value: string): number => {
+  let hash = 2166136261;
+
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return hash >>> 0;
+};
+
+const identityColor = (key: string): number => {
+  return IDENTITY_COLORS[stableHash(key) % IDENTITY_COLORS.length]!;
+};
+
+const formatLogId = (event: MeasureLogEvent): string => {
   const id = `[${event.id}]`;
+  const key = event.scope ? `scope:${event.scope}` : `label:${event.label}`;
+  return color(identityColor(key), id);
+};
+
+const formatLogLabel = (event: MeasureLogEvent): string => {
+  return color(identityColor(`label:${event.label}`), event.label);
+};
+
+const defaultLogger = (event: MeasureLogEvent) => {
+  const id = formatLogId(event);
 
   switch (event.type) {
     case "start": {
-      console.log(`${id} → ${event.label}`);
+      console.log(`${id} ${color(ANSI_DIM, "→")} ${formatLogLabel(event)}`);
       break;
     }
 
@@ -628,11 +699,14 @@ const defaultLogger = (event: MeasureLogEvent) => {
       const resultSuffix = resultStr ? ` → ${resultStr}` : "";
       const budgetWarn =
         event.budget !== undefined && event.duration > event.budget
-          ? ` ⚠ over budget ${formatDuration(event.budget)}`
+          ? color(ANSI_YELLOW, ` ⚠ over budget ${formatDuration(event.budget)}`)
           : "";
 
       console.log(
-        `${id} ✓ ${formatDuration(event.duration)}${resultSuffix}${budgetWarn}`,
+        `${id} ${color(ANSI_GREEN, "✓")} ${color(
+          ANSI_DIM,
+          formatDuration(event.duration),
+        )}${resultSuffix}${budgetWarn}`,
       );
       break;
     }
@@ -644,11 +718,14 @@ const defaultLogger = (event: MeasureLogEvent) => {
           : String(event.error);
       const budgetWarn =
         event.budget !== undefined && event.duration > event.budget
-          ? ` ⚠ over budget ${formatDuration(event.budget)}`
+          ? color(ANSI_YELLOW, ` ⚠ over budget ${formatDuration(event.budget)}`)
           : "";
 
       console.log(
-        `${id} ✗ ${formatDuration(event.duration)} (${errorMsg})${budgetWarn}`,
+        `${id} ${color(ANSI_RED, "✗")} ${color(
+          ANSI_DIM,
+          formatDuration(event.duration),
+        )} (${errorMsg})${budgetWarn}`,
       );
 
       if (event.error instanceof Error) {
@@ -661,7 +738,7 @@ const defaultLogger = (event: MeasureLogEvent) => {
     }
 
     case "annotation": {
-      console.log(`${id} = ${event.label}`);
+      console.log(`${id} ${color(ANSI_CYAN, "=")} ${formatLogLabel(event)}`);
       break;
     }
   }
@@ -689,10 +766,18 @@ const createMeasureImpl = (scope?: string): MeasureFn => {
 
   const emit = (event: MeasureLogEvent) => {
     if (silent) return;
+
     if (logger) {
-      logger(event);
+      let defaultLogged = false;
+
+      logger(event, () => {
+        if (defaultLogged) return;
+        defaultLogged = true;
+        defaultLogger(event);
+      });
       return;
     }
+
     defaultLogger(event);
   };
 

@@ -3,7 +3,7 @@
   "module": "index.ts",
   "main": "./index.ts",
   "types": "./index.ts",
-  "version": "5.0.0",
+  "version": "5.1.0",
   "type": "module",
   "private": false,
   "description": "Zero-dependency function performance measurement with hierarchical logging",
@@ -28,6 +28,6 @@
   },
   "scripts": {
     "test": "bun test",
-    "example": "bun run example.ts"
+    "example": "bun run examples/basic.ts"
   }
 }

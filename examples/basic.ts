@@ -4,7 +4,7 @@ import {
   configure,
   createMeasure,
   safeStringify,
-} from "./index.ts";
+} from "../index.ts";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -60,7 +60,6 @@ async function main() {
         {
           start: () => "Fetch User",
           end: (user) => user,
-          userId: 1,
         },
         () => fetchUser(1),
       ),
@@ -69,7 +68,6 @@ async function main() {
         {
           start: () => "Fetch User",
           end: (user) => user,
-          userId: 2,
         },
         () => fetchUser(2),
       ),
@@ -78,7 +76,6 @@ async function main() {
         {
           start: () => "Fetch User",
           end: (user) => user,
-          userId: 3,
         },
         () => fetchUser(3),
       ),

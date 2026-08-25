@@ -47,9 +47,9 @@ async function run() {
   const startNested = performance.now();
   for (let i = 0; i < ITERATIONS / 10; i++) {
     // reduce iterations
-    measureSync("root", (m) => {
-      m("child", (m2: any) => {
-        m2("leaf", noop);
+    measureSync("root", () => {
+      measureSync("child", () => {
+        measureSync("leaf", noop);
       });
     });
   }
