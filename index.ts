@@ -89,6 +89,8 @@ export type MeasureLogEvent =
       scope?: string;
       depth: number;
       label: string;
+      /** Normalized event payload. Same value as `value` for start events. */
+      data: unknown;
       value: unknown;
     }
   | {
@@ -99,6 +101,8 @@ export type MeasureLogEvent =
       depth: number;
       label: string;
       duration: number;
+      /** Normalized event payload. Same value as `result` for success events. */
+      data: unknown;
       result: unknown;
       budget?: number;
       maxResultLength?: number;
@@ -111,6 +115,8 @@ export type MeasureLogEvent =
       depth: number;
       label: string;
       duration: number;
+      /** Normalized event payload. Same value as `error` for error events. */
+      data: unknown;
       error: unknown;
       budget?: number;
       maxResultLength?: number;
@@ -122,6 +128,8 @@ export type MeasureLogEvent =
       scope?: string;
       depth: number;
       label: string;
+      /** Normalized event payload. Same value as `value` for annotations. */
+      data: unknown;
       value: unknown;
     };
 
@@ -808,6 +816,7 @@ const createMeasureImpl = (scope?: string): MeasureFn => {
       scope,
       depth: span.depth,
       label,
+      data: startValue,
       value: startValue,
     });
   };
@@ -832,6 +841,7 @@ const createMeasureImpl = (scope?: string): MeasureFn => {
       scope,
       depth: span.depth,
       label,
+      data: startValue,
       value: startValue,
     });
 
@@ -856,6 +866,7 @@ const createMeasureImpl = (scope?: string): MeasureFn => {
           depth: span.depth,
           label,
           duration,
+          data: printedResult,
           result: printedResult,
           budget,
           maxResultLength,
@@ -876,6 +887,7 @@ const createMeasureImpl = (scope?: string): MeasureFn => {
           depth: span.depth,
           label,
           duration,
+          data: printedError,
           error: printedError,
           budget,
           maxResultLength,
@@ -907,6 +919,7 @@ const createMeasureImpl = (scope?: string): MeasureFn => {
       scope,
       depth: span.depth,
       label,
+      data: startValue,
       value: startValue,
     });
 
@@ -924,6 +937,7 @@ const createMeasureImpl = (scope?: string): MeasureFn => {
           depth: span.depth,
           label,
           duration,
+          data: printedResult,
           result: printedResult,
           budget,
           maxResultLength,
@@ -944,6 +958,7 @@ const createMeasureImpl = (scope?: string): MeasureFn => {
           depth: span.depth,
           label,
           duration,
+          data: printedError,
           error: printedError,
           budget,
           maxResultLength,

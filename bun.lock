@@ -3,11 +3,9 @@
   "configVersion": 0,
   "workspaces": {
     "": {
-      "name": "ments-utils",
+      "name": "measure-fn",
       "devDependencies": {
         "@types/bun": "latest",
-      },
-      "peerDependencies": {
         "typescript": "^5",
       },
     },

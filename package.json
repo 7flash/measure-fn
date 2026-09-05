@@ -1,12 +1,27 @@
 {
   "name": "measure-fn",
-  "module": "index.ts",
-  "main": "./index.ts",
-  "types": "./index.ts",
-  "version": "5.1.0",
-  "type": "module",
-  "private": false,
+  "version": "5.2.0",
   "description": "Zero-dependency function performance measurement with hierarchical logging",
+  "type": "module",
+  "module": "./dist/index.js",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "index.ts",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "private": false,
   "keywords": [
     "measure",
     "performance",
@@ -20,14 +35,19 @@
     "type": "git",
     "url": "https://github.com/7flash/measure-fn"
   },
-  "devDependencies": {
-    "@types/bun": "latest"
+  "publishConfig": {
+    "access": "public"
   },
-  "peerDependencies": {
+  "devDependencies": {
+    "@types/bun": "latest",
     "typescript": "^5"
   },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
     "test": "bun test",
-    "example": "bun run examples/basic.ts"
+    "example": "bun run examples/basic.ts",
+    "typecheck": "tsc --noEmit",
+    "example:logger": "bun run examples/custom-logger.ts",
+    "prepack": "tsc -p tsconfig.build.json"
   }
 }

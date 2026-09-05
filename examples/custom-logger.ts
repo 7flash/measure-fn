@@ -3,12 +3,24 @@ import { configure, createMeasure } from "../index.ts";
 configure({
   colors: "auto",
   logger(event, next) {
+    // Filter by label without recreating the built-in logger.
+    if (event.label.startsWith("health:")) return;
+
+    // `data` is the normalized payload for every event type.
+    if (
+      typeof event.data === "object" &&
+      event.data !== null &&
+      "internal" in event.data
+    ) {
+      return;
+    }
+
     // Keep measure-fn's built-in output.
     next();
 
-    // Add any side effect you want without recreating the default formatting.
+    // Add any side effect you want after the normal log.
     if (event.type === "error") {
-      // sendToTelemetry(event);
+      // sendToTelemetry({ label: event.label, data: event.data });
     }
   },
 });
