@@ -13,6 +13,13 @@
     "outDir": "./dist",
     "rootDir": "."
   },
-  "include": ["index.ts"],
-  "exclude": ["dist", "examples", "tests"]
+  "include": [
+    "index.ts",
+    "browser.ts"
+  ],
+  "exclude": [
+    "dist",
+    "examples",
+    "tests"
+  ]
 }

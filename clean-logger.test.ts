@@ -29,6 +29,9 @@ beforeEach(() => {
   configure({
     silent: false,
     logger: null,
+    colors: false,
+    timestamps: false,
+    summarize: false,
     maxResultLength: 200,
   });
 });

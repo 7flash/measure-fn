@@ -1,4 +1,4 @@
-import { createMeasure } from "../index";
+import { createMeasure } from "../index.ts";
 
 /**
  * Production-style measure-fn example.

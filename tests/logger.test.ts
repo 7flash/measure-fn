@@ -9,6 +9,9 @@ afterEach(() => {
     silent: false,
     logger: null,
     colors: "auto",
+    timestamps: false,
+    summarize: false,
+    onLoggerError: null,
   });
 
   if (originalNoColor === undefined) delete process.env.NO_COLOR;
@@ -197,7 +200,7 @@ describe("colors", () => {
     const colorPrefix = (value: string) => value.match(/^\x1b\[\d+m/)?.[0];
 
     expect(colorPrefix(first)).toBeDefined();
-    expect(colorPrefix(first)).toBe(colorPrefix(second));
+    expect(colorPrefix(first) === colorPrefix(second)).toBe(true);
     log.mockRestore();
   });
 

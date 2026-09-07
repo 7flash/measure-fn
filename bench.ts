@@ -1,64 +1,67 @@
-import { measure, measureSync, configure } from "./index.ts";
+import { configure, createMeasure, measure, measureSync } from "./index.ts";
 
-const ITERATIONS = 100_000;
+const iterations = Number(process.env.MEASURE_BENCH_ITERATIONS ?? 100_000);
+if (!Number.isSafeInteger(iterations) || iterations < 1)
+  throw new RangeError("MEASURE_BENCH_ITERATIONS must be a positive integer");
+const trials = 5;
+const median = (values: number[]) =>
+  [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)]!;
+const noop = () => {};
+const asyncNoop = async () => {};
 
-function noop() {}
+// The clock harness stays uninstrumented so it does not alter the baseline.
+const timeSync = (fn: () => void, count: number) => {
+  const start = performance.now();
+  for (let i = 0; i < count; i++) fn();
+  return (performance.now() - start) / count;
+};
+const timeAsync = async (fn: () => Promise<void>, count: number) => {
+  const start = performance.now();
+  for (let i = 0; i < count; i++) await fn();
+  return (performance.now() - start) / count;
+};
 
-async function run() {
-  console.log(
-    `Running benchmark with ${ITERATIONS.toLocaleString()} iterations...`,
+configure({ silent: true });
+const syncSamples: number[] = [];
+const asyncSamples: number[] = [];
+const nestedSamples: number[] = [];
+const syncBaseline: number[] = [];
+const asyncBaseline: number[] = [];
+
+// Warm up the same code paths that are timed.
+for (let i = 0; i < 2_000; i++) {
+  measureSync("warmup", noop);
+  await measure("warmup", asyncNoop);
+}
+for (let trial = 0; trial < trials; trial++) {
+  syncBaseline.push(timeSync(noop, iterations));
+  syncSamples.push(timeSync(() => measureSync("sync", noop), iterations));
+  asyncBaseline.push(await timeAsync(asyncNoop, iterations));
+  asyncSamples.push(
+    await timeAsync(() => measure("async", asyncNoop), iterations),
   );
-  configure({ silent: true }); // Disable logging to measure pure overhead
-
-  // Baseline
-  const startBase = performance.now();
-  for (let i = 0; i < ITERATIONS; i++) {
-    noop();
-  }
-  const timeBase = performance.now() - startBase;
-  const perOpBase = timeBase / ITERATIONS;
-  console.log(
-    `Baseline (noop): ${timeBase.toFixed(2)}ms total, ${perOpBase.toFixed(6)}ms/op`,
-  );
-
-  // measureSync overhead
-  const startSync = performance.now();
-  for (let i = 0; i < ITERATIONS; i++) {
-    measureSync("test", noop);
-  }
-  const timeSync = performance.now() - startSync;
-  const overheadSync = (timeSync - timeBase) / ITERATIONS;
-  console.log(
-    `measureSync:     ${timeSync.toFixed(2)}ms total, ${overheadSync.toFixed(6)}ms overhead/op`,
-  );
-
-  // measure (async) overhead
-  const startAsync = performance.now();
-  for (let i = 0; i < ITERATIONS; i++) {
-    await measure("test", async () => {});
-  }
-  const timeAsync = performance.now() - startAsync;
-  const overheadAsync = (timeAsync - timeBase) / ITERATIONS;
-  console.log(
-    `measure (async): ${timeAsync.toFixed(2)}ms total, ${overheadAsync.toFixed(6)}ms overhead/op`,
-  );
-
-  // Nested overhead (depth 3)
-  const startNested = performance.now();
-  for (let i = 0; i < ITERATIONS / 10; i++) {
-    // reduce iterations
-    measureSync("root", () => {
-      measureSync("child", () => {
-        measureSync("leaf", noop);
-      });
-    });
-  }
-  const timeNested = performance.now() - startNested;
-  // 3 measurements per iteration
-  const perOpNested = timeNested / (ITERATIONS / 10);
-  console.log(
-    `Nested (depth 3): ${timeNested.toFixed(2)}ms total, ${perOpNested.toFixed(6)}ms per tree (3 ops)`,
+  nestedSamples.push(
+    timeSync(
+      () => {
+        measureSync("root", () => {
+          measureSync("child", () => {
+            measureSync("leaf", noop);
+          });
+        });
+      },
+      Math.max(1, Math.floor(iterations / 10)),
+    ),
   );
 }
 
-run();
+configure({ silent: false });
+createMeasure("bench").sync("median measurements", () => ({
+  iterations,
+  trials,
+  syncMsPerCall: median(syncSamples),
+  asyncMsPerCall: median(asyncSamples),
+  syncOverheadMs: median(syncSamples) - median(syncBaseline),
+  asyncOverheadMs: median(asyncSamples) - median(asyncBaseline),
+  nestedMsPerTree: median(nestedSamples),
+  note: "Async overhead uses an awaited async baseline. Results are local estimates, not performance guarantees.",
+}));
