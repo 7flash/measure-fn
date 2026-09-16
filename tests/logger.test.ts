@@ -10,6 +10,7 @@ afterEach(() => {
     logger: null,
     colors: "auto",
     timestamps: false,
+    errorDetails: false,
     summarize: false,
     onLoggerError: null,
   });
@@ -155,8 +156,6 @@ describe("normalized logger data", () => {
     measureSync("ignore-me", () => 1);
     measureSync("keep-start", () => ({ status: "ignored" }));
 
-    // First measurement is fully suppressed by label. The second start is kept,
-    // while its success event is suppressed by normalized data.
     expect(log).toHaveBeenCalledTimes(1);
     expect(String(log.mock.calls[0]?.[0])).toContain("→ keep-start");
 
@@ -165,21 +164,31 @@ describe("normalized logger data", () => {
 });
 
 describe("colors", () => {
-  test("colors: true emits ANSI escapes", () => {
+  const ansi = /\x1b\[[0-9;]+m/g;
+  const stripAnsi = (value: string) => value.replace(ansi, "");
+  const leadingColor = (value: string) => value.match(/^\x1b\[(\d+)m/)?.[1];
+
+  test("colors only the scoped prefix", () => {
     const log = spyOn(console, "log").mockImplementation(() => {});
+    const scoped = createMeasure("api");
 
     configure({ colors: true, logger: null });
-    measureSync("colored", () => 1);
+    scoped.sync("colored", () => 1);
 
-    expect(String(log.mock.calls[0]?.[0])).toContain("\x1b[");
-    expect(String(log.mock.calls[1]?.[0])).toContain("\x1b[");
+    const start = String(log.mock.calls[0]?.[0]);
+    const success = String(log.mock.calls[1]?.[0]);
+
+    expect(start.match(ansi)).toHaveLength(2);
+    expect(success.match(ansi)).toHaveLength(2);
+    expect(stripAnsi(start)).toBe("[api] a → colored");
+    expect(stripAnsi(success)).toMatch(/^\[api\] a ✓ /);
     log.mockRestore();
   });
 
-  test("colors: false emits plain text", () => {
+  test("unscoped output stays plain even when colors are enabled", () => {
     const log = spyOn(console, "log").mockImplementation(() => {});
 
-    configure({ colors: false, logger: null });
+    configure({ colors: true, logger: null });
     measureSync("plain", () => 1);
 
     expect(String(log.mock.calls[0]?.[0])).not.toContain("\x1b[");
@@ -187,9 +196,22 @@ describe("colors", () => {
     log.mockRestore();
   });
 
-  test("the same scope keeps the same ID color", () => {
+  test("colors: false emits plain text", () => {
     const log = spyOn(console, "log").mockImplementation(() => {});
     const scoped = createMeasure("api");
+
+    configure({ colors: false, logger: null });
+    scoped.sync("plain", () => 1);
+
+    expect(String(log.mock.calls[0]?.[0])).not.toContain("\x1b[");
+    expect(String(log.mock.calls[1]?.[0])).not.toContain("\x1b[");
+    expect(String(log.mock.calls[0]?.[0])).toBe("[api] a → plain");
+    log.mockRestore();
+  });
+
+  test("the same scope keeps the same color", () => {
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    const scoped = createMeasure("stable-scope");
 
     configure({ colors: true, logger: null });
     scoped.sync("first", () => 1);
@@ -197,28 +219,47 @@ describe("colors", () => {
 
     const first = String(log.mock.calls[0]?.[0]);
     const second = String(log.mock.calls[2]?.[0]);
-    const colorPrefix = (value: string) => value.match(/^\x1b\[\d+m/)?.[0];
 
-    expect(colorPrefix(first)).toBeDefined();
-    expect(colorPrefix(first) === colorPrefix(second)).toBe(true);
+    expect(leadingColor(first)).toBeDefined();
+    const secondColor = leadingColor(second);
+    expect(secondColor).toBeDefined();
+    expect(leadingColor(first)).toBe(secondColor!);
+    log.mockRestore();
+  });
+
+  test("different scopes receive different colors while colors remain available", () => {
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    const api = createMeasure("scope-one");
+    const db = createMeasure("scope-two");
+
+    configure({ colors: true, logger: null });
+    api.sync("first", () => 1);
+    db.sync("second", () => 2);
+
+    const first = String(log.mock.calls[0]?.[0]);
+    const second = String(log.mock.calls[2]?.[0]);
+
+    expect(leadingColor(first)).toBeDefined();
+    expect(leadingColor(second)).toBeDefined();
+    expect(leadingColor(first)).not.toBe(leadingColor(second));
     log.mockRestore();
   });
 
   test("NO_COLOR disables colors in auto mode", () => {
     const log = spyOn(console, "log").mockImplementation(() => {});
+    const scoped = createMeasure("api");
 
     process.env.NO_COLOR = "1";
     delete process.env.FORCE_COLOR;
     configure({ colors: "auto", logger: null });
-    measureSync("plain", () => 1);
+    scoped.sync("plain", () => 1);
 
     expect(String(log.mock.calls[0]?.[0])).not.toContain("\x1b[");
     log.mockRestore();
   });
 });
-
 describe("errors", () => {
-  test("built-in logger keeps compact and detailed error output", () => {
+  test("built-in logger keeps failures on one line by default", () => {
     const log = spyOn(console, "log").mockImplementation(() => {});
     const error = spyOn(console, "error").mockImplementation(() => {});
 
@@ -233,9 +274,54 @@ describe("errors", () => {
     expect(log).toHaveBeenCalledTimes(2);
     expect(String(log.mock.calls[1]?.[0])).toContain("✗");
     expect(String(log.mock.calls[1]?.[0])).toContain("boom");
-    expect(error).toHaveBeenCalledTimes(1);
+    expect(error).not.toHaveBeenCalled();
 
     log.mockRestore();
     error.mockRestore();
+  });
+
+  test("errorDetails opts into the second diagnostic line", () => {
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    const error = spyOn(console, "error").mockImplementation(() => {});
+
+    configure({ colors: false, logger: null, errorDetails: true });
+
+    expect(() =>
+      measureSync("explode", () => {
+        throw new Error("boom");
+      }),
+    ).toThrow("boom");
+
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(String(error.mock.calls[0]?.[0])).toContain("Error: boom");
+
+    log.mockRestore();
+    error.mockRestore();
+  });
+});
+
+describe("timestamps", () => {
+  test("timestamps: true uses compact local time", () => {
+    const log = spyOn(console, "log").mockImplementation(() => {});
+
+    configure({ colors: false, logger: null, timestamps: true });
+    measureSync("work", () => 1);
+
+    expect(String(log.mock.calls[0]?.[0])).toMatch(
+      /^\[\d{2}:\d{2}:\d{2}\.\d{3}\] \[a\] → work$/,
+    );
+    log.mockRestore();
+  });
+
+  test('timestamps: "iso" keeps absolute UTC time available', () => {
+    const log = spyOn(console, "log").mockImplementation(() => {});
+
+    configure({ colors: false, logger: null, timestamps: "iso" });
+    measureSync("work", () => 1);
+
+    expect(String(log.mock.calls[0]?.[0])).toMatch(
+      /^\[\d{4}-\d{2}-\d{2}T.*Z\] \[a\] → work$/,
+    );
+    log.mockRestore();
   });
 });

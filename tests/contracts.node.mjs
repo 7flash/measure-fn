@@ -18,8 +18,8 @@ const terminal = () => events.filter((event) => event.type === "success" || even
 beforeEach(() => {
   events = [];
   configure({
-    silent: false, logger: (event) => events.push(event), onLoggerError: null,
-    colors: false, timestamps: false, summarize: false, stripScopePrefix: false,
+    silent: false, level: "info", slowThreshold: 1000, maxValueLength: 300, logger: (event) => events.push(event), onLoggerError: null,
+    colors: false, timestamps: false, errorDetails: false, summarize: false, stripScopePrefix: false,
     maxResultLength: 0, maxSummaryDepth: 4, maxSummaryStringLength: 160,
     summaryArraySample: 2, summaryObjectKeys: 24,
     sensitiveKeyPattern: /secret|private|mnemonic|seed|keypair|password|authorization|cookie|token|apikey|api_key/i,
@@ -113,7 +113,12 @@ test("middleware delegates at most once and can filter labels and data", () => {
 test("silent measurements preserve work, recovery, and hierarchy while skipping mappers", async () => {
   let mapped = 0;
   configure({ silent: true });
-  const action = { start: () => { mapped++; }, end: () => { mapped++; }, catch: () => 9 };
+  const action = {
+    start: () => { mapped++; },
+    end: () => { mapped++; },
+    error: () => { mapped++; },
+    catch: () => 9,
+  };
   assert.equal(await measure(action, () => 2), 2);
   assert.equal(await measure(action, () => { throw 1; }), 9);
   assert.equal(measureSync(action, () => 3), 3);
@@ -133,6 +138,35 @@ test("rejected async mappers are consumed and identified", async () => {
   await sleep(0);
   assert.match(events[0].label, /synchronously/);
   assert.match(events[1].result.resultMapperError, /synchronously/);
+});
+
+test("error mappers project diagnostics without replacing the original failure", async () => {
+  const original = Object.assign(new Error("secret detail"), { code: "ECONNRESET" });
+  await assert.rejects(
+    measure(
+      { error: (error) => ({ code: error.code, message: "connection reset" }) },
+      () => { throw original; },
+    ),
+    (error) => error === original,
+  );
+  assert.deepEqual(terminal().at(-1).error, { code: "ECONNRESET", message: "connection reset" });
+});
+
+test("error mapper failures stay observational", async () => {
+  const original = new Error("business failure");
+  await assert.rejects(
+    measure({ error: () => { throw new Error("projection failure"); } }, () => { throw original; }),
+    (error) => error === original,
+  );
+  assert.deepEqual(terminal().at(-1).error, { errorMapperError: "projection failure" });
+
+  events.length = 0;
+  await assert.rejects(
+    measure({ error: async () => ({ hidden: true }) }, () => { throw original; }),
+    (error) => error === original,
+  );
+  await sleep(0);
+  assert.match(terminal().at(-1).error.errorMapperError, /synchronously/);
 });
 
 test("automatic cross-scope nesting continues after await", async () => {
@@ -270,6 +304,41 @@ test("retry returns an early success and preserves the final thrown value", asyn
   await assert.rejects(measure.retry("retry", { attempts: 2, delay: 0 }, () => { throw original; }), (e) => e === original);
 });
 
+test("retryIf stops retries when the operation owner classifies an error as permanent", async () => {
+  let attempts = 0;
+  const permanent = Object.assign(new Error("unauthorized"), { code: "AUTH" });
+  await assert.rejects(
+    measure.retry(
+      "read",
+      { attempts: 5, delay: 0, retryIf: (error, attempt) => {
+        assert.equal(error, permanent);
+        assert.equal(attempt, 1);
+        return false;
+      } },
+      () => { attempts++; throw permanent; },
+    ),
+    (error) => error === permanent,
+  );
+  assert.equal(attempts, 1);
+});
+
+test("retryIf can classify asynchronously and must return a boolean", async () => {
+  let attempts = 0;
+  assert.equal(
+    await measure.retry(
+      "read",
+      { attempts: 3, delay: 0, retryIf: async (_error, attempt) => attempt < 3 },
+      () => { if (++attempts < 3) throw new Error("temporary"); return 42; },
+    ),
+    42,
+  );
+  assert.equal(attempts, 3);
+  await assert.rejects(
+    measure.retry("read", { attempts: 2, delay: 0, retryIf: () => "yes" }, () => { throw 1; }),
+    /retryIf must return a boolean/,
+  );
+});
+
 test("batch preserves order, continues after failures, and counts fulfilled null as success", async () => {
   let summary;
   const result = await measure.batch({ end: (s) => { summary = s; return s; } }, [1, 2, 3, 4], (n) => { if (n === 2) throw 1; return n === 3 ? null : n; }, { every: 1 });
@@ -379,10 +448,13 @@ test("summarized errors keep a readable compact message and redact detailed caus
   assert.match(lines[1], /\(boom\)/); assert.doesNotMatch(details.join("\n"), /sensitive-value/);
 });
 
-test("detailed raw Error causes also use redacted formatting", () => {
+test("error details are opt-in and keep redaction", () => {
   const details = [];
   console.log = () => {}; console.error = (...args) => details.push(args.join(" "));
   configure({ logger: null });
+  assert.throws(() => measureSync("compact", () => { throw new Error("boom"); }));
+  assert.equal(details.length, 0);
+  configure({ errorDetails: true });
   assert.throws(() => measureSync("failure", () => { throw new Error("boom", { cause: { token: "sensitive-value" } }); }));
   assert.match(details[0], /boom/); assert.doesNotMatch(details.join("\n"), /sensitive-value/);
 });
@@ -391,8 +463,12 @@ test("timestamps, compact markers, scope-prefix stripping, and budget warnings w
   const lines = []; console.log = (line) => lines.push(line);
   configure({ logger: null, timestamps: true, stripScopePrefix: true });
   createMeasure("api").sync({ start: () => "api:work", budget: 0 }, () => 42);
-  assert.match(lines[0], /^\[\d{4}-\d{2}-\d{2}T.*Z\] \[api:a\] → work$/);
+  assert.match(lines[0], /^\[\d{2}:\d{2}:\d{2}\.\d{3}\] \[api\] a → work$/);
   assert.match(lines[1], /✓ .* → 42.*over budget/);
+  lines.length = 0;
+  configure({ timestamps: "iso" });
+  createMeasure("iso").sync("work", () => 1);
+  assert.match(lines[0], /^\[\d{4}-\d{2}-\d{2}T.*Z\] \[iso\] a → work$/);
 });
 
 test("colors are deterministic and auto mode respects NO_COLOR and FORCE_COLOR", () => {
@@ -410,4 +486,118 @@ test("duration formatting carries rounded seconds into the next minute", () => {
   assert.equal(formatDuration(0.5), "0.50ms"); assert.equal(formatDuration(1500), "1.5s");
   assert.equal(formatDuration(90000), "1m 30s"); assert.equal(formatDuration(119999), "2m 0s");
   assert.throws(() => formatDuration(NaN), RangeError);
+});
+
+
+test("error details are printed once per original error across async and sync scopes", async () => {
+  const lines = []; const details = [];
+  console.log = (line) => lines.push(line); console.error = (line) => details.push(line);
+  configure({ logger: null, errorDetails: true, summarize: true, maxValueLength: 300 });
+  const failure = new Error("reconcile", { cause: { reason: "missing deltas", token: "private" } });
+  const outer = createMeasure("outer"); const inner = createMeasure("inner");
+  await assert.rejects(outer("run", () => inner("sell", () => { throw failure; })), e => e === failure);
+  assert.throws(() => outer.sync("again", () => { throw failure; }), e => e === failure);
+  assert.equal(lines.filter(line => line.includes("✗")).length, 3);
+  assert.equal(details.filter(line => line.includes("Error: reconcile")).length, 1);
+  assert.equal(details.filter(line => line.includes("Cause:")).length, 1);
+  assert.match(details[0], /inner/);
+  assert.match(details[1], /missing deltas/); assert.doesNotMatch(details.join("\n"), /private/);
+  assert.throws(() => inner.sync("distinct", () => { throw new Error("reconcile"); }));
+  assert.equal(details.filter(line => line.includes("Error: reconcile")).length, 2);
+});
+
+test("scope errors level retains failures and labeled slow successes while middleware sees all events", async () => {
+  const lines = []; console.log = (line) => lines.push(line);
+  configure({ logger: (event, next) => { events.push(event); next(); }, maxValueLength: 300 });
+  const m = createMeasure("server:rpc-gate", { level: "errors", slowThreshold: 10 });
+  await m("fast", () => 1); m.note("checkpoint");
+  await m("slow RPC", async () => { await sleep(20); return 2; });
+  m.sync({ start: () => "budgeted", budget: 0 }, () => 3);
+  await assert.rejects(m("failure", () => { throw new Error("boom"); }));
+  assert.equal(lines.length, 3);
+  assert.match(lines[0], /✓ slow RPC .* → 2/);
+  assert.match(lines[1], /budgeted.*over budget/);
+  assert.match(lines[2], /✗.*boom/);
+  assert.equal(events.length, 9);
+  const silentScope = createMeasure("quiet", { level: "silent" });
+  await silentScope("still observed", () => 5);
+  assert.equal(lines.length, 3); assert.equal(events.at(-1).result, 5);
+});
+
+test("scope policy survives bound context, retries, batches, and global updates", async () => {
+  const lines = []; console.log = (line) => lines.push(line);
+  configure({ logger: null, level: "info", maxValueLength: 300 });
+  const quiet = createMeasure("quiet", { level: "silent", maxValueLength: 7 });
+  await quiet.bindContext()("bound", () => 1);
+  await quiet.retry("retry", { attempts: 1 }, () => 2);
+  await quiet.batch("batch", [1,2,3], x => x, { every: 1 });
+  assert.equal(lines.length, 0);
+  const m = createMeasure("dynamic");
+  configure({ level: "errors" });
+  await m("fast", () => 1); assert.equal(lines.length, 0);
+  configure({ level: "info" });
+});
+
+test("value limits apply to notes, starts and mapped end values without truncating telemetry", async () => {
+  const lines = []; console.log = (line) => lines.push(line);
+  configure({ maxValueLength: 12, logger: (event, next) => { events.push(event); next(); } });
+  const text = "x".repeat(500);
+  measure.note({ start: () => ({ text }) });
+  assert.match(lines[0], /…$/); assert.equal(events[0].value.text.length, 500);
+  const m = createMeasure("capped", { maxValueLength: 8 });
+  await m({ start: () => text, end: () => ({ text }) }, () => 1);
+  assert.match(lines[1], /x{7}…$/); assert.match(lines[2], /→ .{7}…$/);
+  assert.equal(events.at(-1).result.text.length, 500);
+  await m({ start: () => "unlimited", maxValueLength: 0 }, () => text);
+  assert.ok(lines.at(-1).includes(text));
+  await m({ start: () => "alias", maxValueLength: 9, maxResultLength: 5 }, () => text);
+  assert.match(lines.at(-1), /→ .{4}…$/);
+  configure({ maxResultLength: 0 });
+  configure({ maxValueLength: 6 });
+  await measure("global", () => text); assert.match(lines.at(-1), /→ .{5}…$/);
+});
+
+test("scope settings and global updates validate before applying", () => {
+  for (const opts of [{level:"verbose"}, {slowThreshold:-1}, {slowThreshold:Infinity}, {maxValueLength:1.5}, {maxResultLength:-1}])
+    assert.throws(() => createMeasure("bad", opts));
+  configure({ maxValueLength: 9, level: "info" });
+  assert.throws(() => configure({ level: "silent", maxValueLength: -1 }));
+  const lines = []; console.log = line => lines.push(line); configure({ logger:null });
+  measureSync("still enabled", () => "x".repeat(20));
+  assert.equal(lines.length, 2); assert.match(lines[1], /→ .{8}…$/);
+});
+
+test("environment exact scopes beat wildcard and explicit scope level wins", () => {
+  const source = `import { createMeasure, configure } from './dist/index.js';
+    configure({colors:false});
+    await createMeasure('server:rpc-gate')('hidden',()=>1);
+    await createMeasure('other')('visible',()=>2);
+    await createMeasure('server:rpc-gate',{level:'info'})('explicit',()=>3);`;
+  const result = spawnSync(process.execPath, ['--input-type=module','-e', source], {
+    cwd: process.cwd(), encoding:'utf8', env:{...process.env, MEASURE_SILENT:'0', MEASURE_LEVEL:'server:rpc-gate=errors,*=info'}
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(result.stdout, /hidden/); assert.match(result.stdout, /visible/); assert.match(result.stdout, /explicit/);
+  const invalid = spawnSync(process.execPath, ['--input-type=module','-e', "import './dist/index.js'"], {
+    cwd: process.cwd(), encoding:'utf8', env:{...process.env, MEASURE_LEVEL:'*=verbose'}
+  });
+  assert.notEqual(invalid.status, 0); assert.match(invalid.stderr, /level must be/);
+  const defaults = spawnSync(process.execPath, ['--input-type=module','-e', "import {safeStringify} from './dist/index.js'; console.log(safeStringify('x'.repeat(500)).length)"], {
+    cwd: process.cwd(), encoding:'utf8', env:{...process.env, MEASURE_LEVEL:''}
+  });
+  assert.equal(defaults.stdout.trim(), '300');
+});
+
+test("a suppressed failure does not consume error details and scope options are copied", async () => {
+  const details=[]; const lines=[];
+  console.error=line=>details.push(line); console.log=line=>lines.push(line);
+  configure({logger:null,errorDetails:true});
+  const error=new Error("visible later");
+  const settings={level:"silent",maxValueLength:10};
+  const quiet=createMeasure("hidden",settings);
+  settings.level="info";
+  await assert.rejects(quiet("hidden",()=>{throw error;}));
+  assert.equal(lines.length,0); assert.equal(details.length,0);
+  await assert.rejects(createMeasure("visible")("visible",()=>{throw error;}));
+  assert.equal(details.length,1); assert.match(details[0],/visible later/);
 });

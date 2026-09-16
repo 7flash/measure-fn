@@ -1,6 +1,6 @@
 {
   "name": "measure-fn",
-  "version": "5.3.0",
+  "version": "5.3.1",
   "description": "Zero-dependency function performance measurement with hierarchical logging",
   "type": "module",
   "module": "./dist/index.js",
@@ -31,7 +31,7 @@
     "format.ts",
     "config.ts",
     "README.md",
-    "CHANGELOG.md",
+    "SKILL.md",
     "LICENSE"
   ],
   "sideEffects": false,
@@ -67,6 +67,7 @@
     "check": "npm run typecheck && npm test && npm run test:package",
     "test:node": "node --test tests/contracts.node.mjs",
     "test:browser": "node --test tests/browser.node.mjs",
+    "test:browser:runtime": "npm run build && node scripts/test-browser-runtime.mjs",
     "test:bun": "bun test",
     "bench": "bun run bench.ts",
     "test:package": "node scripts/test-package.mjs"

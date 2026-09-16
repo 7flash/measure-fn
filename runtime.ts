@@ -4,6 +4,8 @@ import {
   MAX_TIMER_MS,
   options,
   silent,
+  scopeLevel,
+  validateScopeOptions,
 } from "./config.js";
 import type { ContextStorage, Span } from "./context.js";
 import { formatDuration, toAlpha } from "./format.js";
@@ -20,6 +22,7 @@ import type {
   MeasureActionObject,
   MeasureFn,
   MeasureSyncFn,
+  MeasureScopeOptions,
   TimedResult,
 } from "./types.js";
 
@@ -85,7 +88,7 @@ function endValue<T>(action: MeasureAction<T>, result: T): unknown {
   return summarize(action, value);
 }
 
-function settings(action: AnyAction, sync = false) {
+function settings(action: AnyAction, sync = false, scopeOptions: MeasureScopeOptions = {}) {
   if (
     typeof action !== "string" &&
     (typeof action !== "object" || action === null)
@@ -98,10 +101,11 @@ function settings(action: AnyAction, sync = false) {
   }
   const budget =
     obj?.budget === undefined ? undefined : finiteNumber("budget", obj.budget);
-  const maxResultLength =
-    obj?.maxResultLength === undefined
-      ? options.maxResultLength
-      : integer("maxResultLength", obj.maxResultLength);
+  if (obj?.maxValueLength !== undefined) integer("maxValueLength", obj.maxValueLength);
+  if (obj?.maxResultLength !== undefined) integer("maxResultLength", obj.maxResultLength);
+  const maxResultLength = obj?.maxResultLength ?? obj?.maxValueLength ??
+    scopeOptions.maxResultLength ?? scopeOptions.maxValueLength ??
+    options.maxResultLength ?? options.maxValueLength;
   const timeout =
     obj?.timeout === undefined
       ? undefined
@@ -141,7 +145,15 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
     scope?: string,
     counter = { value: 0 },
     boundParent?: Span | null,
+    scopeOptions: MeasureScopeOptions = {},
   ): MeasureFn {
+    const actionSettings = (action: AnyAction, sync = false) => settings(action, sync, scopeOptions);
+    const policy = (cap: number, originalError?: unknown) => ({
+      level: scopeOptions.level ?? scopeLevel(scope),
+      slowThreshold: scopeOptions.slowThreshold ?? options.slowThreshold,
+      maxValueLength: cap,
+      originalError,
+    });
     const formatId = (id: string) => (scope ? `${scope}:${id}` : id);
     const createSpan = (detached = false): Span => {
       const parent = detached
@@ -172,7 +184,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
     });
 
     const note = (action: AnyAction, opts?: RunOptions) => {
-      settings(action);
+      const { maxResultLength } = actionSettings(action);
       if (silent) return;
       const span = createSpan(opts?.detached);
       const value = startValue(action);
@@ -181,7 +193,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
         type: "annotation",
         value,
         data: value,
-      });
+      }, policy(maxResultLength));
     };
 
     const run = async <T>(
@@ -189,7 +201,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
       fn: () => MaybePromise<T>,
       opts?: RunOptions,
     ): Promise<T> => {
-      const { budget, maxResultLength, timeout } = settings(action);
+      const { budget, maxResultLength, timeout } = actionSettings(action);
       const span = createSpan(opts?.detached);
       const observed = !silent;
       const value = observed ? startValue(action) : undefined;
@@ -197,7 +209,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
         span,
         observed ? labelValue(scope, action, value) : "",
       );
-      if (observed) emit({ ...meta, type: "start", value, data: value });
+      if (observed) emit({ ...meta, type: "start", value, data: value }, policy(maxResultLength));
       const startedAt = performance.now();
       return await storage.run(span, async () => {
         let result: T;
@@ -216,7 +228,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
               data: printed,
               budget,
               maxResultLength,
-            });
+            }, policy(maxResultLength, error));
           }
           const recover = actionObject(action)?.catch;
           if (recover) return await recover(error);
@@ -234,7 +246,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
             data: printed,
             budget,
             maxResultLength,
-          });
+          }, policy(maxResultLength));
         }
         return result;
       });
@@ -245,7 +257,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
       fn: () => T,
       opts?: RunOptions,
     ): T => {
-      const { budget, maxResultLength } = settings(action, true);
+      const { budget, maxResultLength } = actionSettings(action, true);
       const span = createSpan(opts?.detached);
       const observed = !silent;
       const value = observed ? startValue(action) : undefined;
@@ -253,7 +265,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
         span,
         observed ? labelValue(scope, action, value) : "",
       );
-      if (observed) emit({ ...meta, type: "start", value, data: value });
+      if (observed) emit({ ...meta, type: "start", value, data: value }, policy(maxResultLength));
       const startedAt = performance.now();
       return storage.run(span, () => {
         let result: T;
@@ -276,7 +288,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
               data: printed,
               budget,
               maxResultLength,
-            });
+            }, policy(maxResultLength, error));
           }
           const recover = actionObject(action)?.catch;
           if (recover) {
@@ -301,7 +313,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
             data: printed,
             budget,
             maxResultLength,
-          });
+          }, policy(maxResultLength));
         }
         return result;
       });
@@ -309,7 +321,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
 
     const sync = ((action: AnyAction, fn?: () => unknown) => {
       if (fn === undefined) {
-        settings(action, true);
+        actionSettings(action, true);
         note(action);
         return null;
       }
@@ -319,7 +331,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
     }) as MeasureSyncFn;
     sync.root = ((action: AnyAction, fn?: () => unknown) => {
       if (fn === undefined) {
-        settings(action, true);
+        actionSettings(action, true);
         note(action, { detached: true });
         return null;
       }
@@ -328,7 +340,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
       return runSync(action, fn, { detached: true });
     }) as MeasureSyncFn["root"];
     sync.note = (action) => {
-      settings(action, true);
+      actionSettings(action, true);
       note(action);
     };
     sync.timed = <T>(action: MeasureAction<T>, fn: () => T): TimedResult<T> => {
@@ -389,7 +401,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
       };
 
     m.retry = async (action, opts, fn) => {
-      settings(action);
+      actionSettings(action);
       const attempts = integer("attempts", opts.attempts ?? 3, 1);
       const delay = finiteNumber("delay", opts.delay ?? 1000, 0, MAX_TIMER_MS);
       const backoff = finiteNumber(
@@ -402,6 +414,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
         scope,
         counter,
         boundParent === undefined ? (storage.getStore() ?? null) : boundParent,
+        scopeOptions,
       );
       for (let i = 0; i < attempts; i++) {
         const suffix = `[${i + 1}/${attempts}]`;
@@ -469,7 +482,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
           }
           if ((i + 1) % every === 0 && i + 1 < total) {
             const report = () =>
-              createImpl(scope, counter).note(`${i + 1}/${total} (${ok} ok)`);
+              createImpl(scope, counter, undefined, scopeOptions).note(`${i + 1}/${total} (${ok} ok)`);
             if (span) storage.run(span, report);
             else report();
           }
@@ -481,7 +494,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
     m.measure = m;
     m.measureSync = sync;
     m.bindContext = () =>
-      createImpl(scope, counter, storage.getStore() ?? boundParent ?? null);
+      createImpl(scope, counter, storage.getStore() ?? boundParent ?? null, scopeOptions);
     m.resetCounter = () => {
       counter.value = 0;
     };
@@ -491,6 +504,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
   return {
     measure,
     measureSync: measure.sync,
-    createMeasure: (scope?: string) => createImpl(scope),
+    createMeasure: (scope?: string, opts: MeasureScopeOptions = {}) =>
+      createImpl(scope, undefined, undefined, validateScopeOptions(opts)),
   };
 }

@@ -1,4 +1,4 @@
-import type { ConfigureOpts, MeasureLogger, MeasureLogEvent } from "./types.js";
+import type { ConfigureOpts, MeasureLogger, MeasureLogEvent, MeasureLevel, MeasureScopeOptions } from "./types.js";
 
 const env = typeof process === "undefined" ? undefined : process.env;
 export const DEFAULT_SENSITIVE_KEY =
@@ -7,11 +7,18 @@ export const MAX_TIMER_MS = 2_147_483_647;
 
 export const options = {
   timestamps:
-    env?.MEASURE_TIMESTAMPS === "1" || env?.MEASURE_TIMESTAMPS === "true",
+    env?.MEASURE_TIMESTAMPS === "iso"
+      ? ("iso" as const)
+      : env?.MEASURE_TIMESTAMPS === "1" || env?.MEASURE_TIMESTAMPS === "true",
+  errorDetails:
+    env?.MEASURE_ERROR_DETAILS === "1" || env?.MEASURE_ERROR_DETAILS === "true",
   colors: "auto" as boolean | "auto",
   summarize: false,
   stripScopePrefix: false,
-  maxResultLength: 0,
+  maxResultLength: undefined as number | undefined,
+  maxValueLength: 300,
+  level: "info" as MeasureLevel,
+  slowThreshold: 1000,
   maxSummaryDepth: 4,
   maxSummaryStringLength: 160,
   summaryArraySample: 2,
@@ -46,11 +53,43 @@ export function integer(name: string, value: number, min = 0): number {
   return value;
 }
 
+export function validateScopeOptions(opts: MeasureScopeOptions): MeasureScopeOptions {
+  if (opts.level !== undefined && !["info", "errors", "silent"].includes(opts.level))
+    throw new TypeError("level must be info, errors, or silent");
+  if (opts.slowThreshold !== undefined) finiteNumber("slowThreshold", opts.slowThreshold);
+  for (const key of ["maxValueLength", "maxResultLength"] as const)
+    if (opts[key] !== undefined) integer(key, opts[key]);
+  return { ...opts };
+}
+
+/** Exact scope rules win over the wildcard regardless of order. Invalid rules fail early. */
+const levelRules = new Map<string, MeasureLevel>();
+if (env?.MEASURE_LEVEL) {
+  for (const entry of env.MEASURE_LEVEL.split(",")) {
+    const parts = entry.split("=").map((part) => part.trim());
+    if (parts.length !== 2 || !parts[0])
+      throw new TypeError("MEASURE_LEVEL must contain scope=level rules");
+    const level = parts[1] as MeasureLevel;
+    validateScopeOptions({ level });
+    levelRules.set(parts[0]!, level);
+  }
+}
+export const scopeLevel = (scope?: string): MeasureLevel =>
+  (scope === undefined ? undefined : levelRules.get(scope)) ?? levelRules.get("*") ?? options.level;
+
 /** Validate the entire update before changing any global state. */
 export function configure(opts: ConfigureOpts): void {
+  validateScopeOptions(opts);
   const next = { ...options };
+  if (opts.level !== undefined) next.level = opts.level;
+  if (opts.slowThreshold !== undefined) next.slowThreshold = opts.slowThreshold;
+  if (opts.maxValueLength !== undefined) {
+    next.maxValueLength = opts.maxValueLength;
+    next.maxResultLength = undefined;
+  }
   for (const key of [
     "maxResultLength",
+    "maxValueLength",
     "maxSummaryDepth",
     "maxSummaryStringLength",
     "summaryArraySample",
@@ -58,12 +97,21 @@ export function configure(opts: ConfigureOpts): void {
   ] as const) {
     if (opts[key] !== undefined) next[key] = integer(key, opts[key]);
   }
-  for (const key of ["timestamps", "summarize", "stripScopePrefix"] as const) {
+  for (const key of [
+    "summarize",
+    "stripScopePrefix",
+    "errorDetails",
+  ] as const) {
     if (opts[key] !== undefined) {
       if (typeof opts[key] !== "boolean")
         throw new TypeError(`${key} must be a boolean`);
       next[key] = opts[key];
     }
+  }
+  if (opts.timestamps !== undefined) {
+    if (typeof opts.timestamps !== "boolean" && opts.timestamps !== "iso")
+      throw new TypeError("timestamps must be true, false, or iso");
+    next.timestamps = opts.timestamps;
   }
   if (opts.silent !== undefined && typeof opts.silent !== "boolean") {
     throw new TypeError("silent must be a boolean");

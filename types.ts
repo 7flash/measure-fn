@@ -1,3 +1,15 @@
+export type MeasureLevel = "info" | "errors" | "silent";
+export interface MeasureScopeOptions {
+  /** Built-in console verbosity; middleware still receives every event. */
+  level?: MeasureLevel;
+  /** Successful calls above this duration (ms) remain visible at errors level. */
+  slowThreshold?: number;
+  /** Printed value cap; 0 disables truncation. */
+  maxValueLength?: number;
+  /** Backward-compatible alias, preferred when both caps are supplied. */
+  maxResultLength?: number;
+}
+
 export type MaybePromise<T> = T | PromiseLike<T>;
 
 export interface MeasureActionObject<T = unknown> {
@@ -6,6 +18,8 @@ export interface MeasureActionObject<T = unknown> {
 
   /** Maps the successful result to the value printed after the arrow. */
   end?: (result: T) => unknown;
+
+  error?: (error: unknown) => unknown;
 
   /** Optional recovery. If omitted, measure throws the original error. */
   catch?: (error: unknown) => MaybePromise<T>;
@@ -16,7 +30,10 @@ export interface MeasureActionObject<T = unknown> {
   /** Deadline in ms (0 disables it). Does not cancel the operation. */
   timeout?: number;
 
-  /** Optional per-measure result print cap. */
+  /** Per-action printed value cap; 0 disables truncation. */
+  maxValueLength?: number;
+
+  /** Optional per-measure result print cap (alias of maxValueLength). */
   maxResultLength?: number;
 
   /** Override global auto-summary behavior for this measure. */
@@ -104,7 +121,7 @@ export type MeasureLogger = (
   next: MeasureLogNext,
 ) => void;
 
-export type ConfigureOpts = {
+export type ConfigureOpts = MeasureScopeOptions & {
   silent?: boolean;
 
   /**
@@ -123,8 +140,10 @@ export type ConfigureOpts = {
 
   maxResultLength?: number;
 
-  /** Prefix built-in output with an ISO timestamp. */
-  timestamps?: boolean;
+  /** Prefix built-in output with compact local time, or use "iso" for UTC ISO time. */
+  timestamps?: boolean | "iso";
+
+  errorDetails?: boolean;
 
   /** Auto-summarize measured results before printing/logging. */
   summarize?: boolean;
@@ -157,6 +176,7 @@ export type RetryOpts = {
   attempts?: number;
   delay?: number;
   backoff?: number;
+  retryIf?: (error: unknown, attempt: number) => MaybePromise<boolean>;
 };
 
 export type BatchOpts = {

@@ -1,27 +1,13 @@
-import {
-  logger,
-  onLoggerError,
-  options,
-  silent,
-  isSensitiveKey,
-} from "./config.js";
+import { logger, onLoggerError, options, silent } from "./config.js";
 import { formatDuration } from "./format.js";
-import {
-  errorMessage,
-  errorStack,
-  ownValue,
-  stringifyForLog,
-} from "./serialization.js";
-import type { MeasureLogEvent } from "./types.js";
+import { errorMessage, errorStack, ownValue, stringifyForLog } from "./serialization.js";
+import type { MeasureLogEvent, MeasureScopeOptions } from "./types.js";
 
 const ANSI_RESET = "\x1b[0m";
-const ANSI_DIM = 90;
-const ANSI_GREEN = 32;
-const ANSI_RED = 31;
-const ANSI_YELLOW = 33;
-const ANSI_CYAN = 36;
+const SCOPE_COLORS = [36, 35, 34, 33, 32, 31, 96, 95, 94, 93, 92, 91] as const;
 
-const IDENTITY_COLORS = [36, 35, 34, 33, 32, 96, 95, 94, 93, 92] as const;
+const assignedScopeColors = new Map<string, number>();
+const assignedColorScopes = new Map<number, string>();
 
 const shouldUseColors = (): boolean => {
   if (options.colors === true) return true;
@@ -51,67 +37,87 @@ const stableHash = (value: string): number => {
   return hash >>> 0;
 };
 
-const identityColor = (key: string): number => {
-  return IDENTITY_COLORS[stableHash(key) % IDENTITY_COLORS.length]!;
+const scopeColor = (scope: string): number => {
+  const assigned = assignedScopeColors.get(scope);
+  if (assigned !== undefined) return assigned;
+
+  const start = stableHash(scope) % SCOPE_COLORS.length;
+  for (let offset = 0; offset < SCOPE_COLORS.length; offset++) {
+    const code = SCOPE_COLORS[(start + offset) % SCOPE_COLORS.length]!;
+    if (assignedColorScopes.has(code)) continue;
+    assignedScopeColors.set(scope, code);
+    assignedColorScopes.set(code, scope);
+    return code;
+  }
+
+  const code = SCOPE_COLORS[start]!;
+  assignedScopeColors.set(scope, code);
+  return code;
 };
 
 const formatLogId = (event: MeasureLogEvent): string => {
-  const id = `[${event.id}]`;
-  const key = event.scope ? `scope:${event.scope}` : `label:${event.label}`;
-  return color(identityColor(key), id);
+  if (!event.scope) return `[${event.rawId}]`;
+  return `${color(scopeColor(event.scope), `[${event.scope}]`)} ${event.rawId}`;
 };
 
-const formatLogLabel = (event: MeasureLogEvent): string => {
-  return color(identityColor(`label:${event.label}`), event.label);
+const localTimestamp = (date: Date): string => {
+  const two = (value: number) => String(value).padStart(2, "0");
+  const milliseconds = String(date.getMilliseconds()).padStart(3, "0");
+  return `${two(date.getHours())}:${two(date.getMinutes())}:${two(date.getSeconds())}.${milliseconds}`;
 };
 
-function defaultLogger(event: MeasureLogEvent): void {
-  const id = `${options.timestamps ? `[${new Date().toISOString()}] ` : ""}${formatLogId(event)}`;
+const timestampPrefix = (): string => {
+  if (!options.timestamps) return "";
+  const now = new Date();
+  return `[${options.timestamps === "iso" ? now.toISOString() : localTimestamp(now)}] `;
+};
+
+export type ConsolePolicy = MeasureScopeOptions & { originalError?: unknown };
+const printedErrors = new WeakSet<object>();
+const truncate = (text: string, cap: number) =>
+  cap > 0 && text.length > cap ? text.slice(0, cap - 1) + "…" : text;
+
+function defaultLogger(event: MeasureLogEvent, policy: ConsolePolicy): void {
+  const level = policy.level ?? options.level;
+  if (level === "silent") return;
+  const slow = event.type === "success" &&
+    (event.duration > (policy.slowThreshold ?? options.slowThreshold) ||
+      (event.budget !== undefined && event.duration > event.budget));
+  if (level === "errors" && event.type !== "error" && !slow) return;
+  const cap = policy.maxValueLength ?? options.maxResultLength ?? options.maxValueLength;
+  const id = `${timestampPrefix()}${formatLogId(event)}`;
   if (event.type === "start" || event.type === "annotation") {
-    console.log(
-      `${id} ${event.type === "start" ? color(ANSI_DIM, "→") : color(ANSI_CYAN, "=")} ${formatLogLabel(event)}`,
-    );
+    console.log(`${id} ${event.type === "start" ? "→" : "="} ${truncate(event.label, cap)}`);
     return;
   }
   const budget =
     event.budget !== undefined && event.duration > event.budget
-      ? color(ANSI_YELLOW, ` ⚠ over budget ${formatDuration(event.budget)}`)
+      ? ` ⚠ over budget ${formatDuration(event.budget)}`
       : "";
-  const duration = color(ANSI_DIM, formatDuration(event.duration));
+  const duration = formatDuration(event.duration);
   if (event.type === "success") {
-    const result = stringifyForLog(event.result, event.maxResultLength);
-    console.log(
-      `${id} ${color(ANSI_GREEN, "✓")} ${duration}${result ? ` → ${result}` : ""}${budget}`,
-    );
+    const result = stringifyForLog(event.result, cap);
+    console.log(`${id} ✓ ${level === "errors" ? `${truncate(event.label, cap)} ` : ""}${duration}${result ? ` → ${result}` : ""}${budget}`);
     return;
   }
-  console.log(
-    `${id} ${color(ANSI_RED, "✗")} ${duration} (${errorMessage(event.error)})${budget}`,
-  );
-  if (event.error instanceof Error) {
-    const stack = isSensitiveKey("stack") ? undefined : errorStack(event.error);
-    console.error(
-      id,
-      isSensitiveKey("stack")
-        ? "[omitted]"
-        : typeof stack === "string"
-          ? stack
-          : errorMessage(event.error),
-    );
-    const cause = ownValue(event.error, "cause");
-    if (cause !== undefined)
-      console.error(
-        `${id} Cause:`,
-        isSensitiveKey("cause")
-          ? "[omitted]"
-          : stringifyForLog(cause, event.maxResultLength),
-      );
-  } else {
-    console.error(id, stringifyForLog(event.error, event.maxResultLength));
+  console.log(`${id} ✗ ${duration} (${errorMessage(event.error)})${budget}`);
+  if (!options.errorDetails) return;
+  const original = policy.originalError ?? event.error;
+  if ((typeof original === "object" && original !== null) || typeof original === "function") {
+    if (printedErrors.has(original)) return;
+    printedErrors.add(original);
+  }
+  const detail =
+    original instanceof Error
+      ? (errorStack(original) ?? errorMessage(original))
+      : stringifyForLog(event.error, cap);
+  if (detail) console.error(`${id} ${detail}`);
+  if (typeof original === "object" && original !== null) {
+    const cause = ownValue(original, "cause");
+    if (cause !== undefined) console.error(`${id} Cause: ${stringifyForLog(cause, 0)}`);
   }
 }
 
-/** Observe rejected logger promises without adding them to application latency. */
 export function consumeThenable(
   value: unknown,
   failed: (error: unknown) => void,
@@ -139,14 +145,13 @@ function reportFailure(error: unknown, event: MeasureLogEvent): void {
   try {
     consumeThenable(onLoggerError(error, event), () => {});
   } catch {
-    // Diagnostics must not recursively fail or replace the application error.
   } finally {
     reporting = false;
   }
 }
 
 let emitting = false;
-export function emit(event: MeasureLogEvent): void {
+export function emit(event: MeasureLogEvent, policy: ConsolePolicy = {}): void {
   if (silent || emitting || reporting) return;
   emitting = true;
   let delegated = false;
@@ -154,7 +159,7 @@ export function emit(event: MeasureLogEvent): void {
     if (delegated) return;
     delegated = true;
     try {
-      defaultLogger(event);
+      defaultLogger(event, policy);
     } catch (error) {
       reportFailure(error, event);
     }

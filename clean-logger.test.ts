@@ -31,6 +31,7 @@ beforeEach(() => {
     logger: null,
     colors: false,
     timestamps: false,
+    errorDetails: false,
     summarize: false,
     maxResultLength: 200,
   });
@@ -49,10 +50,10 @@ describe("clean default logger", () => {
 
     out.restore();
 
-    expect(out.logs[0]).toBe("[app:a] → GET /api/state req_1");
-    expect(out.logs[1]).toBe("[app:a-a] → API: /api/state");
-    expect(out.logs[2]).toMatch(/^\[app:a-a\] ✓ .* → \{"status":200\}$/);
-    expect(out.logs[3]).toMatch(/^\[app:a\] ✓ /);
+    expect(out.logs[0]).toBe("[app] a → GET /api/state req_1");
+    expect(out.logs[1]).toBe("[app] a-a → API: /api/state");
+    expect(out.logs[2]).toMatch(/^\[app\] a-a ✓ .* → \{"status":200\}$/);
+    expect(out.logs[3]).toMatch(/^\[app\] a ✓ /);
     expect(out.logs.join("\n")).not.toContain("···");
   });
 
@@ -70,9 +71,10 @@ describe("clean default logger", () => {
 
     out.restore();
 
-    expect(out.logs[0]).toBe("[app:a] → fail");
-    expect(out.logs[1]).toMatch(/^\[app:a\] ✗ .* \(boom\)$/);
+    expect(out.logs[0]).toBe("[app] a → fail");
+    expect(out.logs[1]).toMatch(/^\[app\] a ✗ .* \(boom\)$/);
     expect(out.logs[1]).not.toContain("···");
+    expect(out.errors).toEqual([]);
   });
 
   test("prints compact budget warning", async () => {

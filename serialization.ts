@@ -188,7 +188,7 @@ export function summarizeForMeasure(
 /** Internal formatter: its input has already received action-level summarization. */
 export function stringifyForLog(
   value: unknown,
-  limit = options.maxResultLength,
+  limit = options.maxResultLength ?? options.maxValueLength,
 ): string {
   const cap = integer("maxResultLength", limit);
   if (value === undefined) return "";

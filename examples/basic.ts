@@ -1,11 +1,8 @@
-import { configure, createMeasure, safeStringify } from "../index.ts";
+import { createMeasure, safeStringify } from "../index.ts";
 
 const app = createMeasure("app");
-const db = createMeasure("db");
 const pause = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
-
-configure({ timestamps: true });
 
 try {
   await app.root("example", async () => {
@@ -15,7 +12,7 @@ try {
     const users = await app("load users", async () => {
       return await Promise.all(
         [1, 2, 3].map((id) =>
-          db(
+          app(
             { start: () => `user:${id}`, end: (user) => ({ id: user.id }) },
             async () => {
               await pause(5);
@@ -28,8 +25,19 @@ try {
 
     let attempt = 0;
     await app.retry(
-      "temporary failure",
-      { attempts: 3, delay: 5, backoff: 2 },
+      {
+        start: () => "temporary read",
+        error: (error) => ({
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      },
+      {
+        attempts: 3,
+        delay: 5,
+        backoff: 2,
+        retryIf: (error) =>
+          error instanceof Error && error.message === "Temporary failure",
+      },
       () => {
         if (++attempt < 3) throw new Error("Temporary failure");
         return { attempt, ready: true };
@@ -57,6 +65,9 @@ try {
       {
         start: () => "GET /missing",
         end: (res: Response) => ({ status: res.status }),
+        error: (error) => ({
+          message: error instanceof Error ? error.message : String(error),
+        }),
         catch: () => new Response("Not found", { status: 404 }),
       },
       async () => {

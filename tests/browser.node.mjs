@@ -65,7 +65,7 @@ test("bundled runtime runs without process, require, or Node globals", async () 
   assert.equal(events.length, 2);
   api.configure({ logger: null, colors: "auto", timestamps: true });
   assert.equal(api.measureSync("sync", () => 7), 7);
-  assert.match(logs[0][0], /Z\] \[.*\] → sync$/);
+  assert.match(logs[0][0], /^\[\d{2}:\d{2}:\d{2}\.\d{3}\] \[.*\] → sync$/);
 });
 
 test("browser automatic nesting works synchronously without leaking across await", async () => {
@@ -127,4 +127,20 @@ test("browser context unwinds after callback failure and detached root", async (
   await assert.rejects(m.root("failed", () => { throw new Error("fail"); }));
   m.sync.root("outer", () => { m.sync.root("detached", () => 1); m.sync("child", () => 2); });
   assert.deepEqual(events.filter((e) => e.type === "start").map((e) => e.id), ["ui:a", "ui:b", "ui:c", "ui:b-a"]);
+});
+
+
+test("browser scopes support errors verbosity, value caps and original-error deduplication", async () => {
+  const { api, events, logs } = await browserRuntime();
+  api.configure({ logger: (event,next) => { events.push(event); next(); }, errorDetails:true, summarize:true });
+  const m = api.createMeasure("rpc", {level:"errors", slowThreshold:0, maxValueLength:10});
+  await m("slow browser",()=>"x".repeat(100));
+  assert.equal(logs.length,1); assert.match(logs[0][0], /✓ slow brow…/);
+  const quiet = api.createMeasure("quiet", {level:"silent"});
+  await quiet("hidden",()=>1); assert.equal(logs.length,1);
+  const e = {message:"boom",cause:{reason:"bad"}};
+  await assert.rejects(m("outer",()=>m("inner",()=>{throw e;})),value=>value===e);
+  assert.equal(logs.filter(args=>args[0].includes("✗")).length,2);
+  assert.equal(logs.filter(args=>args[0].includes("Cause:")).length,1);
+  assert.equal(events.at(-1).type,"error");
 });

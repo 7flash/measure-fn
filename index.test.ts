@@ -89,8 +89,8 @@ describe("measure", () => {
     out.restore();
 
     expect(result).toBe("ok");
-    expect(out.logs[0]).toBe("[app:a] → Fetch");
-    expect(out.logs[1]).toMatch(/\[app:a\] ✓ .* → "ok"/);
+    expect(out.logs[0]).toBe("[app] a → Fetch");
+    expect(out.logs[1]).toMatch(/\[app\] a ✓ .* → "ok"/);
   });
 
   test("annotation without fn", async () => {
@@ -98,7 +98,7 @@ describe("measure", () => {
     await app.measure("Ready");
     out.restore();
 
-    expect(out.logs).toEqual(["[app:a] = Ready"]);
+    expect(out.logs).toEqual(["[app] a = Ready"]);
   });
 
   test("throws by default on error", async () => {
@@ -160,9 +160,9 @@ describe("measure", () => {
     });
 
     out.restore();
-    expect(out.logs[0]).toBe("[app:a] → Parent");
-    expect(out.logs[1]).toBe("[app:a-a] → Child A");
-    expect(out.logs[3]).toBe("[app:a-b] → Child B");
+    expect(out.logs[0]).toBe("[app] a → Parent");
+    expect(out.logs[1]).toBe("[app] a-a → Child A");
+    expect(out.logs[3]).toBe("[app] a-b → Child B");
   });
 
   test("parallel children share parent span", async () => {
@@ -180,9 +180,9 @@ describe("measure", () => {
     });
 
     out.restore();
-    expect(out.logs).toContain("[app:a-a] → A");
-    expect(out.logs).toContain("[app:a-b] → B");
-    expect(out.logs).toContain("[app:a-c] → C");
+    expect(out.logs).toContain("[app] a-a → A");
+    expect(out.logs).toContain("[app] a-b → B");
+    expect(out.logs).toContain("[app] a-c → C");
   });
 });
 
@@ -193,7 +193,7 @@ describe("measureSync", () => {
     out.restore();
 
     expect(result).toBe(42);
-    expect(out.logs[0]).toBe("[app:a] → Compute");
+    expect(out.logs[0]).toBe("[app] a → Compute");
     expect(out.logs[1]).toContain("→ 42");
   });
 
@@ -254,8 +254,8 @@ describe("measureSync", () => {
     });
 
     out.restore();
-    expect(out.logs[1]).toBe("[app:a-a] → Child A");
-    expect(out.logs[3]).toBe("[app:a-b] → Child B");
+    expect(out.logs[1]).toBe("[app] a-a → Child A");
+    expect(out.logs[3]).toBe("[app] a-b → Child B");
   });
 });
 
@@ -272,9 +272,9 @@ describe("scopes", () => {
     await a.measure("three", async () => 3);
     out.restore();
 
-    expect(out.logs[0]).toBe("[a:a] → one");
-    expect(out.logs[2]).toBe("[b:a] → two");
-    expect(out.logs[4]).toBe("[a:b] → three");
+    expect(out.logs[0]).toBe("[a] a → one");
+    expect(out.logs[2]).toBe("[b] a → two");
+    expect(out.logs[4]).toBe("[a] b → three");
   });
 });
 
@@ -345,7 +345,7 @@ describe("helpers", () => {
     out.restore();
 
     expect(result).toBe(42);
-    expect(out.logs[0]).toBe("[app:a] → Double");
+    expect(out.logs[0]).toBe("[app] a → Double");
   });
 
   test("retry retries then succeeds", async () => {
