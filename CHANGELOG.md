@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased (6.0.0 proposed: wrap() on generators now returns an iterator)
+
+- Fixed `.retry()` ignoring `retryIf` in 5.3.1, which meant failed operations were always retried and could repeat writes even when the caller intended to stop.
+- Added support for `retryIf(error, attempt)` after each failed attempt except the last, stopping retries when it returns `false` and throwing a `TypeError` if it returns a non-boolean value.
+- Kept the existing retry behavior when `retryIf` is omitted.
+- Fixed action `error()` mappers never being applied in 5.3.1.
+- Action `error()` mappers now control the logged failure value while the caller still receives the original error.
+- Throwing or asynchronous error mappers are reported as `errorMapperError`, consistent with `end()` mapper failures.
+- Changed `wrap()` on generator and async-generator functions to return an iterator instead of a Promise.
+- Wrapped generators now start their span on the first `next()` and finish when iteration completes, throws, or returns early, measuring consumption rather than iterator creation.
+- Nested operations during generator consumption now appear under the generator's span.
+- Fixed synchronous callbacks and `end()` / `error()` mappers invoking `then()` on non-Promise thenables when checking for asynchronous results.
+- Fixed error output exceeding `maxValueLength`; error messages, details, and causes now respect the configured limit.
+- Added optional compact span IDs with `configure({ compactIds: true })` or `createMeasure(scope, { compactIds: true })`.
+- Compact IDs use short per-trace values such as `#a` and `#b` instead of growing with the full ancestor path, while preserving exact `parentId` and `traceId` values.
+- Compact IDs are disabled by default, so existing span IDs and log output remain unchanged.
+- Rewrote the README with installation instructions, a quick-start example, Node.js and Bun guidance, browser context-binding guidance, and an updated API reference covering retries, batch results, generators, logging, and configuration.
+
 ## 5.2.0
 
 - Added normalized `event.data` to every `MeasureLogEvent` variant for logger filtering and routing.
