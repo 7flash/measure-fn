@@ -462,3 +462,187 @@ describe("custom logger", () => {
     expect(events).toEqual([]);
   });
 });
+
+import { test as regressionTest, expect as regressionExpect } from "bun:test";
+import {
+  configure as regressionConfigure,
+  logger as regressionLogger,
+  options as regressionOptions,
+  silent as regressionSilent,
+} from "./config.js";
+import { measure as regressionMeasure, measureSync as regressionSync } from "./index.js";
+async function withRegressionEvents(
+  check: (events: MeasureLogEvent[]) => void | Promise<void>,
+) {
+  const previous = {
+    logger: regressionLogger,
+    silent: regressionSilent,
+    level: regressionOptions.level,
+    colors: regressionOptions.colors,
+    timestamps: regressionOptions.timestamps,
+    errorDetails: regressionOptions.errorDetails,
+  };
+  const events: MeasureLogEvent[] = [];
+  regressionConfigure({
+    logger: (event) => { events.push(event); },
+    silent: false, level: "info", colors: false, timestamps: false,
+    errorDetails: false,
+  });
+  try {
+    await check(events);
+  } finally {
+    regressionConfigure(previous);
+  }
+}
+
+regressionTest("wrap keeps a generator lazy and measures its final value", async () => {
+  await withRegressionEvents((events) => {
+    const wrapped = regressionMeasure.wrap(
+      { start: () => "generator-consume", end: (result: string) => result },
+      function* (this: { base: number }, extra: number): Generator<number, string, void> {
+        regressionSync("generator-child", () => true);
+        yield this.base + extra;
+        yield extra;
+        return "finished";
+      },
+    );
+    const iterator: Generator<number, string, void> = wrapped.call({ base: 2 }, 3);
+    regressionExpect(events).toHaveLength(0);
+    regressionExpect(iterator[Symbol.iterator]()).toBe(iterator);
+    regressionExpect(iterator.next()).toEqual({ value: 5, done: false });
+    const parent = events.find((e) => e.type === "start" && e.label === "generator-consume");
+    const child = events.find((e) => e.type === "start" && e.label === "generator-child");
+    regressionExpect(child?.parentId).toBe(parent!.id);
+    regressionExpect(events.filter((e) => e.type === "success" && e.label === "generator-consume")).toHaveLength(0);
+    regressionExpect(iterator.next()).toEqual({ value: 3, done: false });
+    regressionExpect(iterator.next()).toEqual({ value: "finished", done: true });
+    regressionExpect(events.find((e) => e.type === "success" && e.label === "generator-consume"))
+      .toMatchObject({ result: "finished" });
+  });
+});
+
+regressionTest("wrap completes only when a generator's return/finally finishes", async () => {
+  await withRegressionEvents((events) => {
+    const wrapped = regressionMeasure.wrap("generator-return", function* (): Generator<number, string, void> {
+      try { yield 1; } finally { yield 2; }
+      return "normal";
+    });
+    const unstarted = wrapped();
+    regressionExpect(unstarted.return("unstarted")).toEqual({ value: "unstarted", done: true });
+    regressionExpect(unstarted.next() as unknown).toEqual({ value: undefined, done: true });
+    regressionExpect(events).toHaveLength(0);
+    const iterator = wrapped();
+    regressionExpect(iterator.next()).toEqual({ value: 1, done: false });
+    regressionExpect(iterator.return("stopped")).toEqual({ value: 2, done: false });
+    regressionExpect(events.filter((e) => e.type === "success")).toHaveLength(0);
+    regressionExpect(iterator.next()).toEqual({ value: "stopped", done: true });
+    regressionExpect(events.filter((e) => e.type === "success"))
+      .toHaveLength(1);
+  });
+});
+
+regressionTest("wrap preserves async-generator errors and return semantics", async () => {
+  await withRegressionEvents(async (events) => {
+    const failure = new Error("iteration failed");
+    const wrapped = regressionMeasure.wrap(
+      { start: () => "async-generator", error: () => "mapped failure" },
+      async function* (value: number): AsyncGenerator<number, string, void> {
+        yield value;
+        await Promise.resolve();
+        throw failure;
+      },
+    );
+    const iterator: AsyncGenerator<number, string, void> = wrapped(7);
+    regressionExpect(events).toHaveLength(0);
+    regressionExpect(iterator[Symbol.asyncIterator]()).toBe(iterator);
+    regressionExpect(await iterator.next()).toEqual({ value: 7, done: false });
+    await regressionExpect(iterator.next()).rejects.toBe(failure);
+    regressionExpect(events.find((e) => e.type === "error" && e.label === "async-generator"))
+      .toMatchObject({ error: "mapped failure" });
+    const early = wrapped(8);
+    regressionExpect(await early.next()).toEqual({ value: 8, done: false });
+    regressionExpect(await early.return("stopped")).toEqual({ value: "stopped", done: true });
+    regressionExpect(events.filter((e) => e.type === "success" && e.label === "async-generator"))
+      .toHaveLength(1);
+  });
+});
+
+regressionTest("wrap logs a thrown iterator error without replacing it", async () => {
+  await withRegressionEvents((events) => {
+    const failure = new Error("injected");
+    const iterator = regressionMeasure.wrap("generator-throw", function* () {
+      yield 1;
+      yield 2;
+    })();
+    iterator.next();
+    let thrown: unknown;
+    try { iterator.throw(failure); } catch (error) { thrown = error; }
+    regressionExpect(thrown).toBe(failure);
+    regressionExpect(events.find((e) => e.type === "error" && e.label === "generator-throw"))
+      .toMatchObject({ error: failure });
+  });
+});
+
+regressionTest("non-Promise thenables are detected without executing then()", async () => {
+  await withRegressionEvents(async (events) => {
+    let calls = 0;
+    const fake = { then() { calls++; } };
+    regressionExpect(() => regressionSync("sync-thenable", () => fake as unknown as number))
+      .toThrow("measureSync callback must return synchronously");
+    regressionExpect(regressionSync({ start: () => "end-thenable", end: () => fake }, () => 42))
+      .toBe(42);
+    const failure = new Error("original");
+    let thrown: unknown;
+    try {
+      regressionSync({ start: () => "error-thenable", error: () => fake }, () => { throw failure; });
+    } catch (error) { thrown = error; }
+    regressionExpect(thrown).toBe(failure);
+    const native = Promise.resolve(1);
+    Object.defineProperty(native, "then", { value: () => { calls++; } });
+    regressionExpect(() => regressionSync("native-promise", () => native as unknown as number))
+      .toThrow("measureSync callback must return synchronously");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    regressionExpect(calls).toBe(0);
+    regressionExpect(events.find((e) => e.type === "success" && e.label === "end-thenable"))
+      .toMatchObject({ result: { resultMapperError: "end() must return synchronously" } });
+    regressionExpect(events.find((e) => e.type === "error" && e.label === "error-thenable"))
+      .toMatchObject({ error: { errorMapperError: "error() must return synchronously" } });
+  });
+});
+
+regressionTest("error message, details and cause respect maxValueLength", async () => {
+  await withRegressionEvents((events) => {
+    const logs: string[] = [];
+    const details: string[] = [];
+    const log = console.log;
+    const error = console.error;
+    regressionConfigure({
+      logger: (event, next) => { events.push(event); next(); },
+      errorDetails: true, colors: false, timestamps: false,
+    });
+    console.log = (...args) => { logs.push(args.join(" ")); };
+    console.error = (...args) => { details.push(args.join(" ")); };
+    try {
+      const failure = Object.assign(new Error("abcdefghijklmnopqrstuvwxyz"), {
+        cause: "cause-abcdefghijklmnopqrstuvwxyz",
+      });
+      let thrown: unknown;
+      try {
+        regressionSync({ start: () => "capped-error", maxValueLength: 10 }, () => { throw failure; });
+      } catch (caught) { thrown = caught; }
+      regressionExpect(thrown).toBe(failure);
+      const line = logs.find((entry) => entry.includes(" ✗ "));
+      regressionExpect(line).toContain("(abcdefghi…)");
+      regressionExpect(line).not.toContain("abcdefghijklmnopqrstuvwxyz");
+      regressionExpect(details).toHaveLength(2);
+      for (const detail of details) {
+        const match = detail.match(/^\[[^\]]+\] (?:Cause: )?(.*)$/);
+        regressionExpect(match).not.toBeNull();
+        regressionExpect(match![1]!.length).toBeLessThanOrEqual(10);
+      }
+    } finally {
+      console.log = log;
+      console.error = error;
+    }
+  });
+});

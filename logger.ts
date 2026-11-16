@@ -100,7 +100,7 @@ function defaultLogger(event: MeasureLogEvent, policy: ConsolePolicy): void {
     console.log(`${id} ✓ ${level === "errors" ? `${truncate(event.label, cap)} ` : ""}${duration}${result ? ` → ${result}` : ""}${budget}`);
     return;
   }
-  console.log(`${id} ✗ ${duration} (${errorMessage(event.error)})${budget}`);
+  console.log(`${id} ✗ ${duration} (${truncate(errorMessage(event.error), cap)})${budget}`);
   if (!options.errorDetails) return;
   const original = policy.originalError ?? event.error;
   if ((typeof original === "object" && original !== null) || typeof original === "function") {
@@ -111,10 +111,10 @@ function defaultLogger(event: MeasureLogEvent, policy: ConsolePolicy): void {
     original instanceof Error
       ? (errorStack(original) ?? errorMessage(original))
       : stringifyForLog(event.error, cap);
-  if (detail) console.error(`${id} ${detail}`);
+  if (detail) console.error(`${id} ${truncate(String(detail), cap)}`);
   if (typeof original === "object" && original !== null) {
     const cause = ownValue(original, "cause");
-    if (cause !== undefined) console.error(`${id} Cause: ${stringifyForLog(cause, 0)}`);
+    if (cause !== undefined) console.error(`${id} Cause: ${stringifyForLog(cause, cap)}`);
   }
 }
 
@@ -128,7 +128,13 @@ export function consumeThenable(
       (typeof value === "object" || typeof value === "function") &&
       typeof (value as { then?: unknown }).then === "function"
     ) {
-      void Promise.resolve(value).catch(failed);
+      // Observe native Promises, including cross-realm ones, without
+      // assimilating arbitrary thenables or invoking their then() methods.
+      try {
+        void Promise.prototype.then.call(value, undefined, failed);
+      } catch {
+        // Not a native Promise; detection alone must not execute then().
+      }
       return true;
     }
   } catch (error) {

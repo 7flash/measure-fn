@@ -231,6 +231,16 @@ export type MeasureFn = {
     fn: () => MaybePromise<T>,
   ): Promise<T>;
 
+  wrap<This, A extends unknown[], Y, R, N>(
+    action: MeasureAction<R>,
+    fn: (this: This, ...args: A) => Generator<Y, R, N>,
+  ): (this: This, ...args: A) => Generator<Y, R, N>;
+
+  wrap<This, A extends unknown[], Y, R, N>(
+    action: MeasureAction<R>,
+    fn: (this: This, ...args: A) => AsyncGenerator<Y, R, N>,
+  ): (this: This, ...args: A) => AsyncGenerator<Y, R, N>;
+
   wrap<This, A extends unknown[], R>(
     action: MeasureAction<R>,
     fn: (this: This, ...args: A) => MaybePromise<R>,

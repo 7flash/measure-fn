@@ -409,13 +409,131 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
       });
       return { result, duration };
     };
-    m.wrap = <This, A extends unknown[], R>(
-      action: MeasureAction<R>,
-      fn: (this: This, ...args: A) => MaybePromise<R>,
-    ) =>
-      function (this: This, ...args: A): Promise<R> {
+    // Generator bodies run on next(), not when their iterator is created.
+    const wrapIterator = (
+      action: AnyAction,
+      factory: () => Iterator<unknown> | AsyncIterator<unknown>,
+      isAsync: boolean,
+    ) => {
+      let iterator: Iterator<unknown> | AsyncIterator<unknown> | undefined;
+      let span: Span | undefined;
+      let meta: ReturnType<typeof metadata> | undefined;
+      let budget: number | undefined;
+      let maxResultLength = 0;
+      let observed = false;
+      let startedAt = 0;
+      let finished = false;
+      let closed = false;
+
+      const settle = (type: "success" | "error", result: unknown) => {
+        if (finished) return;
+        finished = true;
+        if (!observed || silent) return;
+        const duration = performance.now() - startedAt;
+        if (type === "success") {
+          const printed = endValue(action, result);
+          emit({
+            ...meta!, type, duration, result: printed, data: printed,
+            budget, maxResultLength,
+          }, policy(maxResultLength));
+        } else {
+          const printed = errorValue(action, result);
+          emit({
+            ...meta!, type, duration, error: printed, data: printed,
+            budget, maxResultLength,
+          }, policy(maxResultLength, result));
+        }
+      };
+
+      const step = (method: "next" | "throw" | "return", arg?: unknown): unknown => {
+        // A return/throw before the first next closes an unstarted generator.
+        if (closed) {
+          if (method === "throw") {
+            if (isAsync) return Promise.reject(arg);
+            throw arg;
+          }
+          const record = { done: true, value: method === "return" ? arg : undefined };
+          return isAsync ? Promise.resolve(record) : record;
+        }
+        if (!iterator) {
+          if (method !== "next") {
+            closed = true;
+            return step(method, arg);
+          }
+          ({ budget, maxResultLength } = actionSettings(action));
+          span = createSpan();
+          observed = !silent;
+          const value = observed ? startValue(action) : undefined;
+          meta = metadata(span, observed ? labelValue(scope, action, value) : "");
+          if (observed) emit({ ...meta, type: "start", value, data: value }, policy(maxResultLength));
+          startedAt = performance.now();
+          try {
+            iterator = storage.run(span, factory);
+          } catch (error) {
+            closed = true;
+            settle("error", error);
+            if (isAsync) return Promise.reject(error);
+            throw error;
+          }
+        }
+        let output: unknown;
+        try {
+          const current = iterator as Iterator<unknown> & AsyncIterator<unknown>;
+          // Each resume re-enters the same span, including resumes after yields.
+          output = storage.run(span!, () => current[method]!(arg));
+        } catch (error) {
+          settle("error", error);
+          if (isAsync) return Promise.reject(error);
+          throw error;
+        }
+        const done = (record: IteratorResult<unknown>) => {
+          if (record.done) settle("success", record.value);
+          return record;
+        };
+        const failed = (error: unknown): never => {
+          settle("error", error);
+          throw error;
+        };
+        if (isAsync)
+          return Promise.resolve(output as Promise<IteratorResult<unknown>>)
+            .then(done, failed);
+        try {
+          return done(output as IteratorResult<unknown>);
+        } catch (error) {
+          settle("error", error);
+          throw error;
+        }
+      };
+      const methods = {
+        next(value?: unknown) { return step("next", value); },
+        throw(error?: unknown) { return step("throw", error); },
+        return(value?: unknown) { return step("return", value); },
+      };
+      return isAsync
+        ? { ...methods, [Symbol.asyncIterator]() { return this; } }
+        : { ...methods, [Symbol.iterator]() { return this; } };
+    };
+
+    m.wrap = ((
+      action: AnyAction,
+      fn: (this: unknown, ...args: unknown[]) => unknown,
+    ) => {
+      const kind = Object.prototype.toString.call(fn);
+      if (kind === "[object GeneratorFunction]" ||
+          kind === "[object AsyncGeneratorFunction]") {
+        const isAsync = kind === "[object AsyncGeneratorFunction]";
+        return function (this: unknown, ...args: unknown[]) {
+          return wrapIterator(
+            action,
+            () => fn.apply(this, args) as Iterator<unknown> | AsyncIterator<unknown>,
+            isAsync,
+          );
+        };
+      }
+      return function (this: unknown, ...args: unknown[]): Promise<unknown> {
         return run(action, () => fn.apply(this, args));
       };
+    }) as MeasureFn["wrap"];
 
     m.retry = async (action, opts, fn) => {
       actionSettings(action);
