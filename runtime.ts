@@ -88,6 +88,23 @@ function endValue<T>(action: MeasureAction<T>, result: T): unknown {
   return summarize(action, value);
 }
 
+/** The value logged for a failure: error(error) when given, else the error.
+ *  Mapping is observational: the caller still receives the original error. */
+function errorValue<T>(action: MeasureAction<T>, error: unknown): unknown {
+  let value: unknown = error;
+  try {
+    const map = actionObject(action)?.error;
+    if (map) {
+      value = map(error);
+      if (consumeThenable(value, () => {}))
+        value = { errorMapperError: "error() must return synchronously" };
+    }
+  } catch (mapperError) {
+    value = { errorMapperError: errorMessage(mapperError) };
+  }
+  return summarize(action, value);
+}
+
 function settings(action: AnyAction, sync = false, scopeOptions: MeasureScopeOptions = {}) {
   if (
     typeof action !== "string" &&
@@ -95,7 +112,7 @@ function settings(action: AnyAction, sync = false, scopeOptions: MeasureScopeOpt
   )
     throw new TypeError("action must be a string or action object");
   const obj = actionObject(action);
-  for (const name of ["start", "end", "catch"] as const) {
+  for (const name of ["start", "end", "error", "catch"] as const) {
     if (obj?.[name] !== undefined && typeof obj[name] !== "function")
       throw new TypeError(`${name} must be a function`);
   }
@@ -219,7 +236,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
           const duration = performance.now() - startedAt;
           opts?.onDuration?.(duration);
           if (observed && !silent) {
-            const printed = summarize(action, error);
+            const printed = errorValue(action, error);
             emit({
               ...meta,
               type: "error",
@@ -279,7 +296,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
           const duration = performance.now() - startedAt;
           opts?.onDuration?.(duration);
           if (observed && !silent) {
-            const printed = summarize(action, error);
+            const printed = errorValue(action, error);
             emit({
               ...meta,
               type: "error",
@@ -433,7 +450,14 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
           return await attemptMeasure(attemptAction, fn);
         } catch (error) {
           lastError = error;
-          if (i + 1 < attempts && delay > 0)
+          if (i + 1 >= attempts) break;
+          if (opts.retryIf) {
+            const retry = await opts.retryIf(error, i + 1);
+            if (typeof retry !== "boolean")
+              throw new TypeError("retryIf must return a boolean");
+            if (!retry) break;
+          }
+          if (delay > 0)
             await sleep(Math.min(MAX_TIMER_MS, delay * backoff ** i));
         }
       }

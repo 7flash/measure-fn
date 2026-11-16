@@ -366,6 +366,48 @@ describe("helpers", () => {
     expect(out.logs.filter((line) => line.includes("✗")).length).toBe(2);
   });
 
+  test("retry stops when retryIf returns false", async () => {
+    let count = 0;
+    const seen: [string, number][] = [];
+    const out = captureConsole();
+
+    const failure = app.measure.retry(
+      "Write",
+      {
+        attempts: 5,
+        delay: 1,
+        retryIf: (error, attempt) => {
+          seen.push([(error as Error).message, attempt]);
+          return (error as Error).message === "busy";
+        },
+      },
+      async () => {
+        count++;
+        throw new Error(count === 1 ? "busy" : "conflict");
+      },
+    );
+
+    await expect(failure).rejects.toThrow("conflict");
+    out.restore();
+    expect(count).toBe(2);
+    expect(seen).toEqual([["busy", 1], ["conflict", 2]]);
+  });
+
+  test("retry does not ask retryIf after the last attempt", async () => {
+    let asked = 0;
+    const out = captureConsole();
+    const failure = app.measure.retry(
+      "Read",
+      { attempts: 2, delay: 1, retryIf: () => (++asked, true) },
+      async () => {
+        throw new Error("down");
+      },
+    );
+    await expect(failure).rejects.toThrow("down");
+    out.restore();
+    expect(asked).toBe(1);
+  });
+
   test("batch continues after item errors", async () => {
     const out = captureConsole();
 
