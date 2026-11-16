@@ -1,6 +1,7 @@
 import {
   finiteNumber,
   integer,
+  logger,
   MAX_TIMER_MS,
   options,
   silent,
@@ -167,6 +168,16 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
     scopeOptions: MeasureScopeOptions = {},
   ): MeasureFn {
     const actionSettings = (action: AnyAction, sync = false) => settings(action, sync, scopeOptions);
+    // Events are only skipped when nobody can receive them: a silent scope
+    // with no custom logger. A custom logger (middleware) sees every event,
+    // and level "errors" still prints slow successes, so both need the full
+    // event.
+    const canLogErrors = () => {
+      if (silent) return false;
+      if (logger) return true;
+      return (scopeOptions.level ?? scopeLevel(scope)) !== "silent";
+    };
+    const canLogLifecycle = canLogErrors;
     const policy = (cap: number, originalError?: unknown) => ({
       level: scopeOptions.level ?? scopeLevel(scope),
       slowThreshold: scopeOptions.slowThreshold ?? options.slowThreshold,
@@ -212,7 +223,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
 
     const note = (action: AnyAction, opts?: RunOptions) => {
       const { maxResultLength } = actionSettings(action);
-      if (silent) return;
+      if (!canLogLifecycle()) return;
       const span = createSpan(opts?.detached);
       const value = startValue(action);
       emit({
@@ -230,25 +241,26 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
     ): Promise<T> => {
       const { budget, maxResultLength, timeout } = actionSettings(action);
       const span = createSpan(opts?.detached);
-      const observed = !silent;
-      const value = observed ? startValue(action) : undefined;
-      const meta = metadata(
-        span,
-        observed ? labelValue(scope, action, value) : "",
-      );
-      if (observed) emit({ ...meta, type: "start", value, data: value }, policy(maxResultLength));
-      const startedAt = performance.now();
+      const logErrors = canLogErrors();
+      const logLifecycle = canLogLifecycle();
+      const value = logErrors ? startValue(action) : undefined;
+      const meta = logErrors
+        ? metadata(span, labelValue(scope, action, value))
+        : undefined;
+      if (logLifecycle) emit({ ...meta!, type: "start", value, data: value }, policy(maxResultLength));
+      const needsDuration = !!opts?.onDuration || logErrors;
+      const startedAt = needsDuration ? performance.now() : 0;
       return await storage.run(span, async () => {
         let result: T;
         try {
           result = timeout ? await withTimeout(fn, timeout) : await fn();
         } catch (error) {
-          const duration = performance.now() - startedAt;
+          const duration = needsDuration ? performance.now() - startedAt : 0;
           opts?.onDuration?.(duration);
-          if (observed && !silent) {
+          if (logErrors) {
             const printed = errorValue(action, error);
             emit({
-              ...meta,
+              ...meta!,
               type: "error",
               duration,
               error: printed,
@@ -261,12 +273,12 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
           if (recover) return await recover(error);
           throw error;
         }
-        const duration = performance.now() - startedAt;
+        const duration = needsDuration ? performance.now() - startedAt : 0;
         opts?.onDuration?.(duration);
-        if (observed && !silent) {
+        if (canLogLifecycle()) {
           const printed = endValue(action, result);
           emit({
-            ...meta,
+            ...meta!,
             type: "success",
             duration,
             result: printed,
@@ -286,14 +298,15 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
     ): T => {
       const { budget, maxResultLength } = actionSettings(action, true);
       const span = createSpan(opts?.detached);
-      const observed = !silent;
-      const value = observed ? startValue(action) : undefined;
-      const meta = metadata(
-        span,
-        observed ? labelValue(scope, action, value) : "",
-      );
-      if (observed) emit({ ...meta, type: "start", value, data: value }, policy(maxResultLength));
-      const startedAt = performance.now();
+      const logErrors = canLogErrors();
+      const logLifecycle = canLogLifecycle();
+      const value = logErrors ? startValue(action) : undefined;
+      const meta = logErrors
+        ? metadata(span, labelValue(scope, action, value))
+        : undefined;
+      if (logLifecycle) emit({ ...meta!, type: "start", value, data: value }, policy(maxResultLength));
+      const needsDuration = !!opts?.onDuration || logErrors;
+      const startedAt = needsDuration ? performance.now() : 0;
       return storage.run(span, () => {
         let result: T;
         try {
@@ -303,12 +316,12 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
               "measureSync callback must return synchronously",
             );
         } catch (error) {
-          const duration = performance.now() - startedAt;
+          const duration = needsDuration ? performance.now() - startedAt : 0;
           opts?.onDuration?.(duration);
-          if (observed && !silent) {
+          if (logErrors) {
             const printed = errorValue(action, error);
             emit({
-              ...meta,
+              ...meta!,
               type: "error",
               duration,
               error: printed,
@@ -328,12 +341,12 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
           }
           throw error;
         }
-        const duration = performance.now() - startedAt;
+        const duration = needsDuration ? performance.now() - startedAt : 0;
         opts?.onDuration?.(duration);
-        if (observed && !silent) {
+        if (canLogLifecycle()) {
           const printed = endValue(action, result);
           emit({
-            ...meta,
+            ...meta!,
             type: "success",
             duration,
             result: printed,
@@ -430,7 +443,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
       let meta: ReturnType<typeof metadata> | undefined;
       let budget: number | undefined;
       let maxResultLength = 0;
-      let observed = false;
+      let logErrors = false;
       let startedAt = 0;
       let finished = false;
       let closed = false;
@@ -438,8 +451,9 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
       const settle = (type: "success" | "error", result: unknown) => {
         if (finished) return;
         finished = true;
-        if (!observed || silent) return;
-        const duration = performance.now() - startedAt;
+        if (type === "success" ? !canLogLifecycle() : !canLogErrors())
+          return;
+        const duration = logErrors ? performance.now() - startedAt : 0;
         if (type === "success") {
           const printed = endValue(action, result);
           emit({
@@ -472,11 +486,14 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
           }
           ({ budget, maxResultLength } = actionSettings(action));
           span = createSpan();
-          observed = !silent;
-          const value = observed ? startValue(action) : undefined;
-          meta = metadata(span, observed ? labelValue(scope, action, value) : "");
-          if (observed) emit({ ...meta, type: "start", value, data: value }, policy(maxResultLength));
-          startedAt = performance.now();
+          logErrors = canLogErrors();
+          const logLifecycle = canLogLifecycle();
+          const value = logErrors ? startValue(action) : undefined;
+          meta = logErrors
+            ? metadata(span, labelValue(scope, action, value))
+            : undefined;
+          if (logLifecycle) emit({ ...meta!, type: "start", value, data: value }, policy(maxResultLength));
+          startedAt = logErrors ? performance.now() : 0;
           try {
             iterator = storage.run(span, factory);
           } catch (error) {
