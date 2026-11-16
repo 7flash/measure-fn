@@ -8,6 +8,8 @@ export interface MeasureScopeOptions {
   maxValueLength?: number;
   /** Backward-compatible alias, preferred when both caps are supplied. */
   maxResultLength?: number;
+  /** Short per-trace IDs instead of ancestor paths (default false). */
+  compactIds?: boolean;
 }
 
 export type MaybePromise<T> = T | PromiseLike<T>;

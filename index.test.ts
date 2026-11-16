@@ -646,3 +646,122 @@ regressionTest("error message, details and cause respect maxValueLength", async 
     }
   });
 });
+describe("compactIds", () => {
+  test("keeps path IDs by default", () => {
+    const events: MeasureLogEvent[] = [];
+    configure({ compactIds: false, logger: (event) => events.push(event) });
+    const legacy = createMeasure("legacy");
+    legacy.sync("outer", () => legacy.sync("inner", () => 1));
+    expect(events.filter((event) => event.type === "start").map((event) => event.id))
+      .toEqual(["legacy:a", "legacy:a-a"]);
+  });
+
+  test("bounds deep IDs and preserves exact event and parent correlation", () => {
+    const events: MeasureLogEvent[] = [];
+    configure({ compactIds: false, logger: (event) => events.push(event) });
+    const compact = createMeasure("deep", { compactIds: true });
+    const descend = (depth: number): void => {
+      if (depth === 80) return;
+      compact.sync(`level ${depth}`, () => descend(depth + 1));
+    };
+    descend(0);
+
+    const starts = events.filter((event) => event.type === "start");
+    expect(starts).toHaveLength(80);
+    expect(new Set(starts.map((event) => event.id)).size).toBe(80);
+    starts.forEach((event, index) => {
+      expect(event.rawId).toMatch(/^#[a-z]+$/);
+      expect(event.rawId.length).toBeLessThan(8);
+      expect(event.depth).toBe(index);
+      expect(event.parentId ?? null).toBe(index ? starts[index - 1]!.id : null);
+      expect(event.traceId).toBe(starts[0]!.traceId);
+      expect(events.filter((other) => other.type === "success" && other.id === event.id))
+        .toHaveLength(1);
+    });
+  });
+
+  test("shares a per-trace sequence across scopes, overrides, and parallel calls", async () => {
+    const events: MeasureLogEvent[] = [];
+    const scoped = createMeasure("scoped", { compactIds: true });
+    const inherited = createMeasure("global");
+    const legacy = createMeasure("old", { compactIds: false });
+    configure({ compactIds: true, logger: (event) => events.push(event) });
+    try {
+      await scoped.root("root", async () => {
+        await Promise.all([
+          inherited("async child", async () => {
+            legacy.sync("legacy child", () => scoped.sync.note("mark"));
+          }),
+          scoped("peer", async () => 2),
+        ]);
+      });
+      scoped.sync.root("new root", () => 3);
+
+      const starts = events.filter((event) => event.type === "start");
+      const [root, child, old, peer, second] = starts;
+      const mark = events.find((event) => event.type === "annotation" && event.label === "mark")!;
+      expect(starts.map((event) => event.rawId))
+        .toEqual(["#a", "#b", "#b-a", "#d", "#a"]);
+      expect(mark.rawId).toBe("#c");
+      expect(child!.parentId).toBe(root!.id);
+      expect(old!.parentId).toBe(child!.id);
+      expect(mark.parentId).toBe(old!.id);
+      expect(peer!.parentId).toBe(root!.id);
+      for (const event of [child!, old!, peer!, mark]) {
+        expect(event.traceId).toBe(root!.traceId);
+      }
+      expect(second!.parentId).toBeUndefined();
+      expect(second!.traceId).not.toBe(root!.traceId);
+    } finally {
+      configure({ compactIds: false, logger: null });
+    }
+  });
+
+  test("retains the trace through bound contexts, retries, and generators", async () => {
+    const events: MeasureLogEvent[] = [];
+    configure({ compactIds: false, logger: (event) => events.push(event) });
+    const compact = createMeasure("helpers", { compactIds: true });
+    let bound: ReturnType<typeof compact.bindContext> | undefined;
+    let attempts = 0;
+    await compact("outer", async () => {
+      bound = compact.bindContext();
+      await compact.retry("attempt", { attempts: 2, delay: 0 }, async () => {
+        if (++attempts === 1) throw new Error("retry");
+        return 42;
+      });
+      const iterate = compact.wrap("generator", function* () {
+        compact.sync.note("inside generator");
+        yield 1;
+        return 2;
+      });
+      const iterator = iterate();
+      expect(iterator.next()).toEqual({ value: 1, done: false });
+      expect(iterator.next()).toEqual({ value: 2, done: true });
+    });
+    await bound!("after completion", async () => 7);
+
+    const starts = events.filter((event) => event.type === "start");
+    const outer = starts.find((event) => event.label === "outer")!;
+    const attemptsStarted = starts.filter((event) => event.label.startsWith("attempt"));
+    const generator = starts.find((event) => event.label === "generator")!;
+    const later = starts.find((event) => event.label === "after completion")!;
+    const note = events.find((event) => event.type === "annotation")!;
+    expect(attemptsStarted).toHaveLength(2);
+    for (const event of [...attemptsStarted, generator, later]) {
+      expect(event.parentId).toBe(outer.id);
+      expect(event.traceId).toBe(outer.traceId);
+    }
+    expect(note.parentId).toBe(generator.id);
+    expect(events.find((event) => event.type === "error" && event.id === attemptsStarted[0]!.id)?.traceId)
+      .toBe(outer.traceId);
+    expect(new Set(events.map((event) => event.id)).size).toBe(6);
+    expect(Math.max(...events.map((event) => event.rawId.length))).toBeLessThan(8);
+  });
+
+  test("rejects non-boolean global and scope options", () => {
+    expect(() => configure({ compactIds: "yes" as unknown as boolean }))
+      .toThrow("compactIds must be a boolean");
+    expect(() => createMeasure("bad", { compactIds: 1 as unknown as boolean }))
+      .toThrow("compactIds must be a boolean");
+  });
+});

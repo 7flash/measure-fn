@@ -15,6 +15,7 @@ export const options = {
   colors: "auto" as boolean | "auto",
   summarize: false,
   stripScopePrefix: false,
+  compactIds: false,
   maxResultLength: undefined as number | undefined,
   maxValueLength: 300,
   level: "info" as MeasureLevel,
@@ -57,6 +58,8 @@ export function validateScopeOptions(opts: MeasureScopeOptions): MeasureScopeOpt
   if (opts.level !== undefined && !["info", "errors", "silent"].includes(opts.level))
     throw new TypeError("level must be info, errors, or silent");
   if (opts.slowThreshold !== undefined) finiteNumber("slowThreshold", opts.slowThreshold);
+  if (opts.compactIds !== undefined && typeof opts.compactIds !== "boolean")
+    throw new TypeError("compactIds must be a boolean");
   for (const key of ["maxValueLength", "maxResultLength"] as const)
     if (opts[key] !== undefined) integer(key, opts[key]);
   return { ...opts };
@@ -100,6 +103,7 @@ export function configure(opts: ConfigureOpts): void {
   for (const key of [
     "summarize",
     "stripScopePrefix",
+    "compactIds",
     "errorDetails",
   ] as const) {
     if (opts[key] !== undefined) {

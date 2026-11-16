@@ -157,6 +157,8 @@ async function withTimeout<T>(
 /** Each platform entry owns one storage and one monotonically increasing trace counter. */
 export function createMeasureRuntime(storage: ContextStorage<Span>) {
   let traceCounter = 0;
+  // Weak keys allow inactive traces to be collected.
+  const compactCounters = new WeakMap<Span, { value: number }>();
 
   function createImpl(
     scope?: string,
@@ -178,10 +180,16 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
         : boundParent === undefined
           ? storage.getStore()
           : boundParent;
-      const id = parent
-        ? `${parent.id}-${toAlpha(parent.childCounter++)}`
-        : toAlpha(counter.value++);
-      return {
+      // Share the counter across every span in the trace, including legacy spans.
+      const sequence = parent
+        ? compactCounters.get(parent) ?? { value: 0 }
+        : { value: 0 };
+      const id = (scopeOptions.compactIds ?? options.compactIds)
+        ? `#${toAlpha(sequence.value++)}`
+        : parent
+          ? `${parent.id}-${toAlpha(parent.childCounter++)}`
+          : toAlpha(counter.value++);
+      const span: Span = {
         id,
         fullId: formatId(id),
         traceId: parent?.traceId ?? String(++traceCounter),
@@ -189,6 +197,8 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
         depth: parent ? parent.depth + 1 : 0,
         childCounter: 0,
       };
+      compactCounters.set(span, sequence);
+      return span;
     };
     const metadata = (span: Span, label: string) => ({
       id: span.fullId,

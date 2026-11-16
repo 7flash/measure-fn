@@ -980,6 +980,10 @@ Individual actions support their own `maxValueLength`, `maxResultLength`, `summa
 
 Invalid numeric configuration values and invalid regex strings throw before any part of a configuration update takes effect.
 
+### Compact span IDs
+
+To keep IDs short in deep or long-running traces, use `configure({ compactIds: true })` globally or `createMeasure("api", { compactIds: true })` for one scope. This emits per-trace IDs such as `#a`, `#b`, rather than growing ancestor paths; scope settings override the global setting, and the default `false` keeps the original format. `id` still includes the scope when set, `parentId` still references the exact parent `id`, and `traceId` still identifies the root. Compact IDs restart per trace, so correlate using `(traceId, id)`; the `#` prefix tells them apart from path IDs even when modes are mixed.
+
 ### Colors and timestamps
 
 By default, `colors: "auto"` uses terminal detection and respects `NO_COLOR`, `FORCE_COLOR=0`, and `FORCE_COLOR`.
