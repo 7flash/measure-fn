@@ -1,55 +1,151 @@
 # measure-fn
 
-`measure-fn` is a zero-runtime-dependency wrapper for measuring named operations, building a local hierarchy, and emitting compact structured log events without changing the application result or error.
+`measure-fn` is a zero-runtime-dependency TypeScript/JavaScript wrapper that times named operations, tracks nested work, and prints compact structured logs without changing your application's results or errors.
 
-The package is intentionally small. It measures work; it does not own application retries, transaction reconciliation, cancellation, background export, or process supervision. Those policies stay at the boundary that understands the operation.
+## Install
+
+```bash
+npm install measure-fn
+```
+
+Works with Node.js 18+, Bun, and browser bundlers. The package ships compiled ESM, TypeScript declarations, and a separate browser build.
+
+There is no CommonJS build. Use ESM imports or dynamic `import()` from CommonJS.
+
+## 30-second example
+
+Create a scope, wrap an operation with `.root()`, and measure the steps inside it.
 
 ```ts
 import { createMeasure } from "measure-fn";
 
 const api = createMeasure("api");
 
-const users = await api.root("GET /users", async () => {
-  return await api("load users", async () => [{ id: 1 }, { id: 2 }]);
+const count = await api.root("GET /users", async () => {
+  const users = await api("load users", async () => {
+    return [{ id: 1 }, { id: 2 }];
+  });
+
+  return await api("count users", async () => users.length);
 });
+
+console.log(count); // 2
 ```
 
-With colors disabled, the built-in logger has this shape:
+With colors disabled, the built-in logger prints something like:
 
 ```text
 [api] a → GET /users
 [api] a-a → load users
-[api] a-a ✓ 1.42ms → [{"id":1},{"id":2}]
-[api] a ✓ 1.85ms → [{"id":1},{"id":2}]
+[api] a-a ✓ 0.40ms → [{"id":1},{"id":2}]
+[api] a-b → count users
+[api] a-b ✓ 0.08ms → 2
+[api] a ✓ 0.95ms → 2
 ```
 
-When colors are enabled, only the `[api]` scope token is colored. Labels, paths, arrows, status markers, durations, results, errors, and budget warnings remain plain text. Each encountered scope receives a stable color for the lifetime of the loaded runtime, and distinct colors are assigned while the scope palette has unused entries.
+Durations are illustrative.
 
-## First principles
+Each line contains a scope (`api`), a hierarchy path (`a-a`), an operation label, and, when the operation finishes, its status, duration, and result or error.
 
-Measurement is an observation boundary. A measured callback should return the same value and throw the same application error it would have produced without measurement unless the caller explicitly chooses recovery. Logger failures must not replace application outcomes, formatting must avoid executing arbitrary application getters or `toJSON`, and timing should measure the callback rather than the logger itself.
+The parent operation includes the time spent in its children.
 
-A scope is an ownership label, not a substitute for the call hierarchy. The scope tells you which subsystem owns an operation; `rawId`, `traceId`, and `parentId` describe where that operation belongs in a local trace. This is why the console gives color to the scope only and leaves everything else neutral.
+The wrapped callback still returns its normal result. If it throws, the measurement logs the failure and rethrows the original error unless you explicitly configure recovery.
 
-The recommended source structure is one scope definition per file. A file may use imported scopes from other modules, but it should not define unrelated `createMeasure()` instances beside each other. This makes the scope name a stable property of a module instead of an ad hoc property of whichever function happened to log something.
+Three conventions are enough to get started:
 
-## Structure code around one scope per file
+- Use `createMeasure("scope")` once in the module that owns a subsystem.
+- Use `.root()` for independent entry points such as HTTP requests, jobs, messages, CLI commands, and recurring worker cycles.
+- Use ordinary measured calls for meaningful steps inside a root. Avoid measuring every trivial expression.
 
-A simple module can own its scope directly:
+## Node.js, Bun, and browsers
+
+The most important runtime difference is how parent context survives `await`.
+
+### Node.js and Bun: automatic asynchronous context
+
+Node.js and Bun use a shared `AsyncLocalStorage` context within the loaded package. Nested measurements remain connected across ordinary asynchronous boundaries.
 
 ```ts
-import { createMeasure } from "measure-fn";
+const api = createMeasure("api");
 
-const users = createMeasure("users");
+await api.root("request", async () => {
+  await Promise.resolve();
 
-export async function loadUser(id: string) {
-  return await users("load user", async () => {
-    return { id };
+  await api("query database", async () => {
+    return [{ id: 1 }];
   });
-}
+});
 ```
 
-When work crosses subsystems, put each scope in the file that owns that subsystem and compose normal functions. Do not define both scopes in the orchestration file. For example, `db.ts` can own the database scope:
+`query database` is automatically a child of `request`.
+
+Different scopes also share this context. A database measurement can become a child of an API measurement without manually passing trace identifiers.
+
+### Browser: call bindContext() before the first await
+
+The browser build cannot reliably track asynchronous parentage using a global synchronous stack.
+
+**Capture the parent with `.bindContext()` while that parent is active, before crossing an asynchronous boundary.** Use the returned bound measure instance for subsequent operations.
+
+Wrong:
+
+```ts
+import { createMeasure } from "measure-fn/browser";
+
+const ui = createMeasure("ui");
+
+await ui.root("message", async () => {
+  await Promise.resolve();
+
+  // Wrong: the active parent may have been lost.
+  await ui("read state", async () => ({ enabled: true }));
+});
+```
+
+Right:
+
+```ts
+import { createMeasure } from "measure-fn/browser";
+
+const ui = createMeasure("ui");
+
+await ui.root("message", async () => {
+  // Capture the parent BEFORE any await.
+  const step = ui.bindContext();
+
+  await Promise.resolve();
+
+  const state = await step("read state", async () => {
+    return { enabled: true };
+  });
+
+  return await step("apply state", () => state);
+});
+```
+
+Both `read state` and `apply state` now retain `message` as their parent.
+
+Capture a fresh binding for each browser request, event, or message. Calling `bindContext()` outside an active measurement produces a binding that starts new roots.
+
+If a helper uses another scope after an asynchronous boundary, pass it an appropriate binding or capture its own binding while the intended parent is still active. A browser binding does not automatically restore parentage for unrelated unbound calls inside later asynchronous callbacks.
+
+### Browser bundling
+
+Browser bundlers, including esbuild with `platform: "browser"`, select `dist/browser.js` using the package export conditions.
+
+You can explicitly import the browser entry:
+
+```ts
+import { createMeasure } from "measure-fn/browser";
+```
+
+Keep browser bundles targeted at browsers. Do not import `dist/index.js` directly or mark `node:async_hooks` external to bypass bundling errors. That would leave a Node-only import in browser code.
+
+## Organize scopes by ownership
+
+Prefer one scope definition per file. Give each subsystem its own scope and compose normal functions across modules.
+
+For example, `db.ts` owns database measurements:
 
 ```ts
 import { createMeasure } from "measure-fn";
@@ -57,11 +153,13 @@ import { createMeasure } from "measure-fn";
 const db = createMeasure("db");
 
 export async function queryUsers() {
-  return await db("SELECT users", async () => [{ id: 1 }]);
+  return await db("SELECT users", async () => {
+    return [{ id: 1 }];
+  });
 }
 ```
 
-Then `users.ts` can own the users scope and call the database module normally:
+Then `users.ts` owns user-related measurements:
 
 ```ts
 import { createMeasure } from "measure-fn";
@@ -76,89 +174,270 @@ export async function loadUsers() {
 }
 ```
 
-In Node.js and Bun, scoped instances from the same loaded package share asynchronous context, so `db` automatically becomes a child of the active `users` span. If several files intentionally share one scope, define that scope once in a small owner module and import it; do not call `createMeasure("same-name")` in every file.
+In Node.js and Bun, the `db` measurement automatically becomes a child of `users`.
 
-Use `.root()` for independent entry points such as requests, messages, jobs, CLI commands, and recurring ticks. Use ordinary measured calls beneath the root. Keep trivial expressions inside their containing measurement instead of wrapping every line.
+A scope identifies the subsystem responsible for work. The measurement hierarchy identifies the operation's actual parent.
 
-## Runtime and browser builds
+If multiple files intentionally share one scope, define it in one small owner module and import it. Avoid creating unrelated scopes side by side in an orchestration file or repeatedly creating independent instances with the same scope name.
 
-Published packages contain compiled ESM and TypeScript declarations. Node.js 18+ and Bun can import the package directly. There is no CommonJS build; use ESM or dynamic `import()` from CommonJS.
+## API reference
 
-Browser bundlers, including esbuild with `platform: "browser"`, select `dist/browser.js` through the package export conditions. You can also select the browser entry explicitly:
+A scoped instance returned by `createMeasure()` is callable and has methods for synchronous work, roots, annotations, timings, retries, batches, and wrappers.
 
-```ts
-import { createMeasure } from "measure-fn/browser";
-```
+### measure(action, fn)
 
-Keep browser bundles targeted at the browser. Do not import `dist/index.js` directly and do not mark `node:async_hooks` external to work around bundling, because that would leave a Node-only import in browser code.
-
-Node and Bun use shared `AsyncLocalStorage`, so ordinary nested calls retain their parent across `await`. Browser code cannot safely infer asynchronous parentage with a global synchronous stack. Capture a binding while the parent is active and use that binding after the first asynchronous boundary:
+The usual measurement is an asynchronous call to the instance.
 
 ```ts
-import { createMeasure } from "measure-fn/browser";
+const api = createMeasure("api");
 
-const extension = createMeasure("extension");
-
-await extension.root("message", async () => {
-  const step = extension.bindContext();
-  await Promise.resolve();
-  const state = await step("read state", async () => ({ enabled: true }));
-  return await step("apply state", () => state);
+const result = await api("load settings", async () => {
+  return { enabled: true };
 });
 ```
 
-Capture a fresh binding for each browser request, event, or message. A binding captured outside an active span creates roots. A helper using another unbound scope after `await` must receive a binding or capture its own while the parent is active.
-
-## Results, action objects, and recovery
-
-`measure(action, fn)` returns a promise for the callback result. `measureSync(action, fn)` returns the original synchronous result. By default both log and rethrow the original application error.
-
-Action objects allow observation and explicit recovery:
+Signature:
 
 ```ts
-const response = await api.root(
+<T>(
+  action: MeasureAction<T>,
+  fn: () => T | PromiseLike<T>,
+) => Promise<T>
+```
+
+`action` is either a string or an action object.
+
+The callback can return a synchronous value or a promise-like value. The measurement always returns a promise of the callback result.
+
+By default, callback failures are logged and the original error is rethrown.
+
+Use `.root()` when the operation should begin an independent hierarchy:
+
+```ts
+await api.root("request", async () => {
+  return await api("load settings", loadSettings);
+});
+```
+
+Both ordinary calls and `.root()` also support annotations without callbacks:
+
+```ts
+const value = await api("checkpoint"); // null
+```
+
+The no-callback asynchronous overload returns `Promise<null>`.
+
+### measureSync(action, fn)
+
+Use `.sync()` for synchronous operations.
+
+```ts
+const result = api.sync("parse config", () => {
+  return JSON.parse('{"enabled":true}');
+});
+```
+
+Signature:
+
+```ts
+<T>(
+  action: MeasureSyncAction<T>,
+  fn: () => T,
+) => T
+```
+
+The synchronous API returns the original value directly, not a promise.
+
+```ts
+const config = api.sync.root("initialize", () => {
+  return api.sync("read defaults", () => ({ enabled: true }));
+});
+```
+
+Synchronous callbacks and synchronous recovery callbacks must remain synchronous.
+
+The sync types disallow promise-like results, and the runtime rejects them if encountered. Synchronous actions cannot specify `timeout`, because a JavaScript timer cannot interrupt blocking synchronous work.
+
+A synchronous annotation also returns `null`:
+
+```ts
+const value = api.sync("initialized"); // null
+```
+
+### Action objects
+
+Use an action object when a measurement needs custom start, success, or error output, recovery, a budget, or a deadline.
+
+```ts
+const settings = await api(
   {
-    start: () => "GET /users",
-    end: (response: Response) => ({ status: response.status }),
-    error: (error) => ({ message: safeErrorMessage(error) }),
-    catch: () => new Response("Internal Server Error", { status: 500 }),
-    budget: 50,
+    start: () => "load settings",
+
+    end: (result: { enabled: boolean }) => ({
+      enabled: result.enabled,
+    }),
+
+    error: (error) => ({
+      message: error instanceof Error ? error.message : String(error),
+    }),
+
+    catch: () => ({ enabled: false }),
+
+    budget: 100,
     timeout: 2_000,
   },
-  async () => new Response("ok"),
+  async () => {
+    return { enabled: true };
+  },
 );
 ```
 
-`start`, `end`, and `error` are synchronous observation mappers. `end` changes the logged success payload without changing the returned value. `error` changes only the logged error payload; the original error still goes to `catch` or is rethrown unchanged. This makes it possible to keep raw errors for control flow while emitting a small sanitized diagnostic such as `{ code, message, stage }`. A throwing or asynchronous mapper produces an observer diagnostic instead of replacing the application result or failure. Keep mappers pure because silent mode skips them.
+The supported action fields are:
 
-`catch` is explicit recovery. Use it only when the returned value is a valid result for the caller. A recovered operation still emits an error event for the failed callback and then returns the recovery value; it does not emit a second success event. If recovery throws, that recovery error propagates.
+| Field | Type | Behavior |
+| --- | --- | --- |
+| `start` | `() => unknown` | Produces the value printed when the operation starts. |
+| `end` | `(result: T) => unknown` | Maps the successful result to the logged success value. |
+| `error` | `(error: unknown) => unknown` | Maps the failure to the logged error value. |
+| `catch` | `(error: unknown) => T \| PromiseLike<T>` | Explicitly recovers from an operation failure. |
+| `budget` | `number` | Warns when duration exceeds this many milliseconds. |
+| `timeout` | `number` | Sets a deadline in milliseconds. `0` disables it. |
+| `maxValueLength` | `number` | Overrides the printed value cap for this action. `0` disables truncation. |
+| `maxResultLength` | `number` | Backward-compatible alias for `maxValueLength`. |
+| `summarize` | `boolean` | Overrides automatic summarization for this action. |
+| `stripScopePrefix` | `boolean` | Overrides duplicate scope-prefix stripping for this action. |
 
-Synchronous callbacks and synchronous recovery must remain synchronous. Promise-like results are rejected by the sync runtime and disallowed by the sync types. Synchronous actions do not accept `timeout`, because a timer cannot interrupt blocking JavaScript.
+The sync action type supports the same fields except that `timeout` is forbidden and `catch` must return `T` synchronously.
 
-Calls without a callback are annotations and return `null`; `.note(action)` emits an annotation and returns `void`.
+#### start, end, and error only change observation
+
+The three mappers do not transform the application's return value or thrown error.
 
 ```ts
-api.sync("load config", () => ({ env: "production" }));
-api.note("application ready");
-await api("checkpoint");
+const result = await api(
+  {
+    start: () => "calculate",
+    end: (value: number) => ({ answer: value }),
+  },
+  () => 42,
+);
+
+// result === 42
+// The success log contains {"answer":42}.
 ```
 
-## Error handling by operation semantics
+The `error` mapper receives the original failure and produces the value used in the error log.
 
-Do not make a single `continue-on-error` rule responsible for every failure. The owner of the operation should decide whether the correct outcome is retry, defer, recover, pause writes, or terminate deliberately.
+```ts
+await api(
+  {
+    start: () => "read remote data",
+    error: (error) => ({
+      message: error instanceof Error ? error.message : String(error),
+    }),
+  },
+  async () => {
+    throw new Error("connection failed");
+  },
+);
+```
 
-| Failure | Default policy |
-| --- | --- |
-| Repeatable read fails with a classified transient infrastructure error | Retry within a bounded attempt and elapsed-time budget, then defer the unit of work if fresh data is still unavailable. |
-| Read returns missing, invalid, or stale data | Preserve the validation failure or explicitly defer. Do not invent a usable zero, empty object, or stale fallback unless the caller explicitly accepts it. |
-| Write or multi-step operation loses its response | Treat the outcome as unknown, stop dependent writes, and reconcile durable state before another attempt. |
-| Configuration, authorization, or invariant is invalid | Disable the affected operation or terminate deliberately with a useful diagnostic. Blind retry is not recovery. |
-| Caller requests cancellation or shutdown | Stop scheduling, abort cooperative I/O, settle owned work, and clean up. Do not classify shutdown as a transient fault. |
-| Logger or diagnostic sink fails | Contain the observer failure and optionally report it through `onLoggerError`; never replace the application result or error. |
+The caller still receives the original `Error("connection failed")`.
 
-### Retry only work that is safe to repeat
+This is useful when you need to emit a small diagnostic such as `{ code, message, stage }` without changing error-based application control flow.
 
-`.retry()` is deliberately generic. It retries the callback after failures that pass an optional `retryIf(error, attempt)` predicate; it does not classify errors, add jitter, honor `Retry-After`, cancel the previous attempt, or know whether the operation is idempotent. Use it only when repeating the whole callback is safe.
+Observation mappers are synchronous. If a mapper throws or returns an asynchronous result, the observer failure is diagnosed rather than replacing the application's outcome.
+
+Keep observation mappers pure and side-effect-free. Global silent mode skips them.
+
+#### catch explicitly changes the result
+
+Without `catch`, failures propagate unchanged.
+
+With `catch`, the callback's failure can be converted into a valid recovery value:
+
+```ts
+const value = await api(
+  {
+    start: () => "optional lookup",
+    catch: () => null,
+  },
+  async () => {
+    throw new Error("not found");
+  },
+);
+
+// value === null
+```
+
+A recovered failure still produces an error event. It does not produce a second success event for the recovery value.
+
+Use recovery only when its value is valid for the caller. Do not silently replace missing, invalid, or stale data with invented usable values.
+
+If the recovery callback throws, its error propagates.
+
+For synchronous actions, recovery must be synchronous:
+
+```ts
+const value = api.sync(
+  {
+    start: () => "read optional config",
+    catch: () => null,
+  },
+  () => {
+    throw new Error("missing");
+  },
+);
+```
+
+### Budgets and timeouts
+
+A budget measures performance. It does not change control flow.
+
+```ts
+await api(
+  {
+    start: () => "read cache",
+    budget: 50,
+  },
+  readCache,
+);
+```
+
+If the operation exceeds 50 milliseconds, the built-in logger can report a budget warning. At the `errors` log level, a successful operation exceeding its budget is also visible.
+
+A timeout changes the waiting outcome:
+
+```ts
+await api(
+  {
+    start: () => "fetch remote data",
+    timeout: 2_000,
+  },
+  fetchRemoteData,
+);
+```
+
+A timeout is a deadline, **not cancellation**.
+
+When the timer fires, the measurement rejects. The timer is cleared when the measurement settles.
+
+A timeout does not:
+
+- Interrupt blocking JavaScript.
+- Cancel an already-running callback.
+- Abort network operations automatically.
+- Undo a submitted write or transaction.
+
+The underlying operation may continue after the timeout. Retrying timed-out work can therefore overlap attempts.
+
+Use an `AbortSignal` with cooperative I/O when cancellation matters.
+
+Timeouts and retry delays must fit the platform timer range of `0` through `2,147,483,647` milliseconds.
+
+### retry(action, opts, fn)
+
+`.retry()` repeats a callback after failures, up to the configured attempt limit.
 
 ```ts
 const flags = await api.retry(
@@ -173,26 +452,689 @@ const flags = await api.retry(
 );
 ```
 
-Returning `false` from `retryIf` stops further attempts; an action `catch` still runs only as final explicit recovery.
+Options:
 
-For a transport where authentication errors, malformed requests, and transient network failures require different policies, keep retry ownership in the application layer that can classify them. Avoid stacking independent retry loops in the transport, SDK, and application, because attempt counts multiply and total delay becomes difficult to reason about.
+| Option | Type | Behavior |
+| --- | --- | --- |
+| `attempts` | `number` | Maximum number of attempts, including the initial attempt. |
+| `delay` | `number` | Initial delay between attempts, in milliseconds. Defaults to **1000 ms**. |
+| `backoff` | `number` | Multiplier applied to retry delays. |
+| `retryIf` | `(error: unknown, attempt: number) => boolean \| PromiseLike<boolean>` | Decides whether a particular failure can be retried. |
 
-A rejected `fetch()` has no HTTP response. If a read retry policy is based on HTTP status alone, it will miss connection resets and other failures that reject before headers arrive. The retry boundary for a repeatable read should cover connection, response consumption, and decoding, with a single overall deadline and cooperative cancellation where available.
+**Without `retryIf`, every failure is eligible for retry until the attempt limit is reached.**
 
-### Do not automatically retry uncertain writes
+That includes failures caused by invalid input, authorization, business rules, and uncertain writes. The library does not know which operations are safe to repeat.
 
-A network error during a write means the client does not know the outcome. The remote system may already have committed the operation. Retrying the whole workflow can repeat a completed side effect.
+Always guard writes. Prefer a restrictive `retryIf` predicate for repeatable reads, and never blindly retry a write whose previous outcome may already have committed.
 
-A write owner should record enough state to reconcile before resuming:
+`retryIf` receives the original error and the attempt number. It may be synchronous or asynchronous. Returning `false` stops further attempts.
+
+An action's `catch` applies as final explicit recovery, rather than silently converting each individual failed attempt into success.
+
+The retry helper does not classify failures, add jitter, honor `Retry-After`, cancel previous attempts, or guarantee idempotency. It also does not provide a whole-workflow elapsed-time deadline.
+
+Avoid stacking independent retry loops in a transport, an SDK, and the application. Their attempt counts multiply.
+
+For HTTP reads, remember that a rejected `fetch()` may have no response status at all. A policy based only on HTTP status can miss connection resets and failures before headers arrive. A repeatable-read retry boundary should cover connection, response consumption, and decoding, with an overall deadline and cooperative cancellation where available.
+
+### batch(action, items, fn, opts?)
+
+`.batch()` processes items sequentially, keeps their original order, and continues after individual failures.
 
 ```ts
-const pending = await journal.prepare({ operationId, target });
+const results = await api.batch(
+  "process items",
+  [1, 2, 3],
+  async (item, index) => item * 2,
+  { every: 1 },
+);
+
+// [2, 4, 6]
+```
+
+Its callback receives `(item, index)` and may return a value synchronously or asynchronously.
+
+The input is a readonly array. The returned promise resolves to an array of results.
+
+The optional `every` number controls periodic batch progress reporting.
+
+A failed item contributes `null` and processing continues.
+
+```ts
+const results = await api.batch(
+  "process items",
+  [1, 2, 3],
+  async (item) => {
+    if (item === 2) throw new Error("failed");
+    return item * 2;
+  },
+);
+
+// [2, null, 6]
+```
+
+**A failed item is indistinguishable from a successful item that returned `null` in the result array.**
+
+If that distinction matters, return an explicit tagged result from your callback or use another application-level collection strategy.
+
+For batch action objects, the `end` mapper receives:
+
+```ts
+type BatchSummary<R> = {
+  ok: number;
+  total: number;
+  results: (R | null)[];
+};
+```
+
+For example:
+
+```ts
+const results = await api.batch(
+  {
+    start: () => "process records",
+    end: ({ ok, total }) => ({ ok, total }),
+  },
+  records,
+  async (record) => processRecord(record),
+);
+```
+
+The summary's `ok` count distinguishes successful items internally, including successful `null` results. The returned array does not preserve that distinction.
+
+### wrap(action, fn)
+
+`.wrap()` creates a measured function while preserving its arguments and `this` binding.
+
+```ts
+const wrapped = api.wrap("calculate total", async function (
+  this: { multiplier: number },
+  value: number,
+) {
+  return value * this.multiplier;
+});
+
+const calculator = {
+  multiplier: 3,
+  calculate: wrapped,
+};
+
+const result = await calculator.calculate(10); // 30
+```
+
+The asynchronous wrapper returns a promise for ordinary functions.
+
+Generator and async-generator functions stay lazy: the wrapper returns an iterator, the step starts on the first `next()` and ends when the iterator finishes, throws or is returned early, so it measures consuming the sequence rather than creating it. Steps run while iterating nest under it.
+
+```ts
+const rows = api.wrap("read rows", async function* () {
+  yield* source();
+});
+
+for await (const row of rows()) handle(row);
+```
+
+For synchronous functions, use `.sync.wrap()`:
+
+```ts
+const add = api.sync.wrap("add", (a: number, b: number) => {
+  return a + b;
+});
+
+const result = add(2, 3); // 5
+```
+
+Wrappers preserve normal method arguments and `this`. They are not constructor wrappers and do not copy custom properties attached to the original function.
+
+### timed(action, fn)
+
+Use `.timed()` when code needs the duration as data rather than only in logs.
+
+```ts
+const { result, duration } = await api.timed(
+  "compute",
+  async () => 42,
+);
+```
+
+The return type is:
+
+```ts
+type TimedResult<T> = {
+  result: T;
+  duration: number;
+};
+```
+
+The synchronous equivalent is:
+
+```ts
+const timing = api.sync.timed("compute", () => 42);
+```
+
+The reported duration is the same duration used by the measurement's success or error event.
+
+Timing begins after the start mapper and start logger, and ends before the terminal mapper and logger. It measures the callback rather than the logger itself.
+
+Parent durations include child work and child instrumentation.
+
+### note(action)
+
+Use `.note()` for an annotation that has no measured callback.
+
+```ts
+api.note("application ready");
+api.sync.note("configuration loaded");
+```
+
+Both return `void`.
+
+Annotations create structured `annotation` events, rather than timing a callback.
+
+Calling the main measurement function without a callback also creates an annotation but returns `null` (or `Promise<null>` for the asynchronous API).
+
+### root(action, fn)
+
+`.root()` explicitly starts an independent local trace.
+
+```ts
+await api.root("request", async () => {
+  return await api("load data", loadData);
+});
+```
+
+The asynchronous and synchronous root methods mirror their respective ordinary measurement methods:
+
+```ts
+await api.root("request", async () => 42);
+
+const value = api.sync.root("startup", () => 42);
+```
+
+Use roots for independent incoming work. Nested operations normally do not need additional roots.
+
+### bindContext()
+
+`.bindContext()` captures the current parent and returns a bound `MeasureFn`.
+
+```ts
+const bound = api.bindContext();
+```
+
+It is especially important in browser code, where you must capture the intended parent before an asynchronous boundary.
+
+In Node.js and Bun, ordinary nested asynchronous calls generally retain context automatically.
+
+### resetCounter()
+
+`.resetCounter()` resets the display root counter for that instance.
+
+```ts
+api.resetCounter();
+```
+
+It does not reset active child counters or `traceId` values.
+
+Trace identifiers remain unique within the loaded runtime even when display root IDs are reset.
+
+## Log levels and output length
+
+### Scope levels
+
+Three verbosity levels are supported:
+
+| Level | Built-in console output |
+| --- | --- |
+| `info` | Normal start, annotation, success, and error output. Default. |
+| `errors` | Failures and slow successful operations. Suppresses starts and annotations. |
+| `silent` | No built-in console output for the scope. |
+
+Configure a scope when creating it:
+
+```ts
+const rpc = createMeasure("server:rpc-gate", {
+  level: "errors",
+  slowThreshold: 1000,
+  maxValueLength: 300,
+});
+```
+
+At `errors` level, the logger still prints successful operations when their duration exceeds `slowThreshold` or their action `budget`.
+
+The default slow threshold is 1000 milliseconds. Slow success lines include their operation labels, so the output remains useful without corresponding start lines.
+
+Scope levels filter only built-in console output. Custom logger middleware still receives all events, and calling `next()` respects the applicable scope level.
+
+This makes `level: "silent"` different from global `configure({ silent: true })`.
+
+### MEASURE_LEVEL
+
+Set scope levels through an environment variable:
+
+```sh
+MEASURE_LEVEL="server:rpc-gate=errors,*=info"
+```
+
+Exact scope names take precedence over the wildcard fallback.
+
+Precedence for selecting a scope level is:
+
+1. Explicit scope options passed to `createMeasure()`.
+2. Matching `MEASURE_LEVEL` environment rules.
+3. Global `configure({ level })`.
+
+Environment rules are read when the module loads.
+
+When a scope appears multiple times in the environment rules, the last rule wins. Malformed rules throw.
+
+### maxValueLength
+
+`maxValueLength` is the canonical setting for limiting printed values.
+
+```ts
+configure({
+  maxValueLength: 300,
+});
+```
+
+The default is 300 characters, including the final truncation marker `…`.
+
+Set `0` to disable truncation:
+
+```ts
+configure({
+  maxValueLength: 0,
+});
+```
+
+You can set a different limit for an individual scope:
+
+```ts
+const api = createMeasure("api", {
+  maxValueLength: 200,
+});
+```
+
+Or override it for one action:
+
+```ts
+await api(
+  {
+    start: () => "large diagnostic",
+    maxValueLength: 0,
+  },
+  async () => largeValue,
+);
+```
+
+The precedence is action, then scope, then global configuration.
+
+The cap applies to printed start and annotation values and terminal values. It does not truncate returned application results or structured middleware payloads.
+
+Full diagnostic stacks and causes are exempt from this value cap.
+
+The limit bounds rendered string length, not object traversal or memory allocation. Prefer summarization or a small `end` mapper when handling very large results.
+
+The legacy `maxResultLength` name remains supported. When both names are provided at the same configuration tier, `maxResultLength` wins. Setting global `maxValueLength` clears a previously configured global alias.
+
+## Silent operation
+
+There are two different forms of silence.
+
+### Scope-level silence
+
+```ts
+const quiet = createMeasure("cache", {
+  level: "silent",
+});
+```
+
+The built-in console output is suppressed for that scope, but custom logger middleware still receives its events.
+
+The measurement continues to execute and enforce its normal operation semantics.
+
+### Global silent mode
+
+```ts
+configure({ silent: true });
+```
+
+Global silent mode disables observation, including middleware delivery and observation mappers.
+
+Callbacks, deadlines, recovery, and measurement nesting still operate.
+
+A span started while global silent mode is active stays unobserved even if configuration changes before it finishes.
+
+You can also set the initial global silent flag through:
+
+```sh
+MEASURE_SILENT=1
+```
+
+The value `true` is also accepted.
+
+There is no separate `.silent()` method in the public `MeasureFn` API. Use scope levels or `configure({ silent: true })`.
+
+## Custom logging
+
+Use `configure()` to change global behavior or install a logger middleware.
+
+```ts
+import { configure } from "measure-fn";
+
+configure({
+  logger(event, next) {
+    if (event.label.startsWith("health:")) {
+      return;
+    }
+
+    // Inspect or forward the structured event here.
+    next();
+  },
+
+  onLoggerError(error, event) {
+    // Report observer failures through an independent diagnostic path.
+  },
+});
+```
+
+The logger signature is:
+
+```ts
+type MeasureLogger = (
+  event: MeasureLogEvent,
+  next: () => void,
+) => void;
+```
+
+Calling `next()` includes the built-in console output.
+
+Omitting `next()` suppresses or replaces the built-in output for that event.
+
+`next()` is idempotent.
+
+A logger can forward structured events to another sink, implement filtering, or replace the console formatter entirely.
+
+Logger exceptions, console failures, and rejected logger promises are contained so they cannot replace the measured operation's result or original error.
+
+`onLoggerError` receives observer failures and is also protected against failures of its own.
+
+Asynchronous loggers are best effort and are not awaited. There is no built-in telemetry flush lifecycle. Call `next()` synchronously if console ordering matters.
+
+### MeasureLogEvent
+
+Every event contains these shared fields:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `type` | `"start" \| "success" \| "error" \| "annotation"` | Event kind. |
+| `id` | `string` | Scoped display identifier, such as `api:a-a`. |
+| `rawId` | `string` | Hierarchy path, such as `a-a`. |
+| `scope` | `string \| undefined` | Scope that owns the operation. |
+| `depth` | `number` | Hierarchy depth. |
+| `label` | `string` | Operation label. |
+| `traceId` | `string` | Unique local root identifier within the loaded runtime. |
+| `parentId` | `string \| undefined` | Direct parent's scoped display ID. |
+| `data` | `unknown` | Normalized event payload. |
+
+The `data` field always corresponds to the event-specific payload:
+
+| Event type | Payload fields | Additional fields |
+| --- | --- | --- |
+| `start` | `data === value` | `value` |
+| `annotation` | `data === value` | `value` |
+| `success` | `data === result` | `result`, `duration`, optional `budget`, optional `maxResultLength` |
+| `error` | `data === error` | `error`, `duration`, optional `budget`, optional `maxResultLength` |
+
+`duration` is measured in milliseconds.
+
+`maxResultLength` remains the compatibility field name in terminal events even though `maxValueLength` is the canonical configuration name.
+
+The type discriminator allows narrowing:
+
+```ts
+configure({
+  logger(event, next) {
+    if (event.type === "success") {
+      const duration = event.duration;
+      const result = event.result;
+
+      // Custom success handling.
+    }
+
+    if (event.type === "error") {
+      const error = event.error;
+
+      // Custom failure handling.
+    }
+
+    next();
+  },
+});
+```
+
+Treat event payloads as read-only.
+
+When summarization is disabled, event payloads may contain original object references. Console redaction does not sanitize those raw references before they reach custom middleware.
+
+`traceId` is local to the loaded runtime. It does not identify the same request across processes or sessions. Add application-level request, process, session, or correlation identifiers when combining telemetry from multiple runtimes.
+
+## Global configuration
+
+Call `configure()` during application initialization, before concurrent measurements begin.
+
+```ts
+import { configure } from "measure-fn";
+
+configure({
+  level: "info",
+  slowThreshold: 1000,
+  silent: false,
+
+  logger: null,
+  onLoggerError: null,
+
+  colors: "auto",
+  timestamps: false,
+  errorDetails: false,
+
+  maxValueLength: 300,
+  summarize: false,
+  stripScopePrefix: false,
+
+  sensitiveKeyPattern: null,
+  maxSummaryDepth: 4,
+  maxSummaryStringLength: 160,
+  summaryArraySample: 2,
+  summaryObjectKeys: 24,
+});
+```
+
+Configuration is shared by instances from the same loaded package.
+
+The public `ConfigureOpts` type supports:
+
+| Option | Type | Purpose |
+| --- | --- | --- |
+| `level` | `"info" \| "errors" \| "silent"` | Default console verbosity. |
+| `slowThreshold` | `number` | Slow-success threshold in milliseconds. |
+| `silent` | `boolean` | Disable observation globally. |
+| `logger` | `MeasureLogger \| null` | Install or clear log middleware. |
+| `onLoggerError` | `((error, event) => void) \| null` | Receive contained observer failures. |
+| `colors` | `boolean \| "auto"` | Control ANSI scope coloring. |
+| `timestamps` | `boolean \| "iso"` | Control timestamp prefixes. |
+| `errorDetails` | `boolean` | Print detailed error diagnostics. |
+| `maxValueLength` | `number` | Canonical printed value cap. |
+| `maxResultLength` | `number` | Compatibility alias for the value cap. |
+| `summarize` | `boolean` | Enable automatic result summarization. |
+| `stripScopePrefix` | `boolean` | Remove duplicated scope prefixes from labels. |
+| `sensitiveKeyPattern` | `RegExp \| string \| null` | Configure sensitive-key redaction. |
+| `maxSummaryDepth` | `number` | Maximum recursive summary depth. |
+| `maxSummaryStringLength` | `number` | Maximum string length within summaries. |
+| `summaryArraySample` | `number` | Number of array items included in samples. |
+| `summaryObjectKeys` | `number` | Maximum number of object keys included in summaries. |
+
+Scope creation supports only `level`, `slowThreshold`, `maxValueLength`, and its compatibility alias `maxResultLength`.
+
+Individual actions support their own `maxValueLength`, `maxResultLength`, `summarize`, and `stripScopePrefix` overrides, in addition to the operation-specific fields.
+
+Invalid numeric configuration values and invalid regex strings throw before any part of a configuration update takes effect.
+
+### Colors and timestamps
+
+By default, `colors: "auto"` uses terminal detection and respects `NO_COLOR`, `FORCE_COLOR=0`, and `FORCE_COLOR`.
+
+When colors are enabled, only the bracketed scope token is colored:
+
+```text
+[api] a-a ✓ 1.42ms → {"ok":true}
+```
+
+The label, path, arrows, status markers, duration, result, error, and budget warning remain plain text.
+
+Each encountered scope receives a stable color for the lifetime of the loaded runtime. Different scopes receive different colors while unused entries remain in the palette.
+
+Unscoped measurements remain uncolored.
+
+Timestamp options are:
+
+```ts
+configure({ timestamps: false }); // No timestamps.
+configure({ timestamps: true });  // Compact local-time timestamps.
+configure({ timestamps: "iso" }); // UTC ISO timestamps.
+```
+
+The initial timestamp flag can also come from `MEASURE_TIMESTAMPS=1` or `MEASURE_TIMESTAMPS=true`.
+
+## Safe output, summaries, and error details
+
+### Serialization
+
+The built-in formatting is designed to avoid introducing new application failures while inspecting values.
+
+It supports cycles, repeated references, `bigint`, maps, sets, errors, dates, and common platform objects.
+
+Only ancestor cycles become `[Circular]`; repeated references are not automatically treated as cycles.
+
+Plain-object accessors are represented without invoking their getters. User-defined `toJSON` methods are not called.
+
+Invalid dates and unreadable objects produce stable placeholders rather than causing normal formatting to replace the application outcome.
+
+### Summarization
+
+Enable automatic summaries when full results are too large or expensive to display:
+
+```ts
+configure({
+  summarize: true,
+  maxSummaryDepth: 4,
+  maxSummaryStringLength: 160,
+  summaryArraySample: 2,
+  summaryObjectKeys: 24,
+});
+```
+
+You can override summarization for a particular action:
+
+```ts
+await api(
+  {
+    start: () => "load records",
+    summarize: true,
+  },
+  loadRecords,
+);
+```
+
+Summarization and display truncation are separate controls.
+
+A string-length cap is not a general object-traversal budget. Use small projections and bounded summaries when measuring large objects.
+
+### Sensitive data
+
+The default sensitive-key pattern covers common credential names, including passwords, tokens, authorization fields, cookies, and private keys.
+
+Redaction applies to object keys and string map keys.
+
+This is key-based redaction, not a general secret scanner.
+
+Credentials embedded in free text, labels, URLs, stack strings, or arbitrarily named fields may remain visible. Remove or sanitize them at the application boundary before logging.
+
+Custom middleware may receive raw payload references. Do not assume that built-in console redaction has already sanitized middleware data.
+
+If a credential appears in shared logs, rotate it.
+
+### Detailed errors
+
+Detailed error output is opt-in:
+
+```ts
+configure({
+  errorDetails: true,
+});
+```
+
+Or use:
+
+```sh
+MEASURE_ERROR_DETAILS=1
+```
+
+When enabled, the formatter can include stack traces and redacted error causes.
+
+It remembers the original thrown object through a `WeakSet`, including when summarization is enabled.
+
+A particular error object's stack and cause are printed once at its first visible failure. Enclosing failures still receive compact error lines.
+
+Distinct errors with identical messages are treated independently.
+
+Primitive thrown values cannot be tracked by a `WeakSet` and may print at each failure.
+
+Detailed stacks and causes are not truncated by `maxValueLength`.
+
+## Error handling and retry safety
+
+Measurement is an observation boundary. It is not a replacement for application-level failure policy.
+
+A measured callback should return the same result or throw the same error as the unmeasured callback, except where explicit recovery or a configured deadline changes the outcome.
+
+The application must decide whether a failure should be retried, deferred, recovered, reconciled, or treated as fatal.
+
+Common cases:
+
+| Failure | Recommended application policy |
+| --- | --- |
+| Repeatable read fails with a classified transient infrastructure error | Retry within bounded attempts and elapsed time, then defer if fresh data remains unavailable. |
+| Read returns missing, invalid, or stale data | Preserve the validation failure or explicitly defer. |
+| Write loses its response | Treat the outcome as unknown and reconcile durable state before retrying. |
+| Configuration, authorization, or an invariant is invalid | Disable the affected operation or terminate deliberately with a useful diagnostic. |
+| Caller requests cancellation or shutdown | Stop scheduling, abort cooperative I/O, settle owned work, and clean up. |
+| Logging or diagnostics fail | Contain the observer failure without replacing the application result or error. |
+
+### Writes require special care
+
+A network error does not prove that a write failed.
+
+The remote system may already have committed it.
+
+Repeating a payment, order submission, transaction, or multi-step workflow can duplicate a completed side effect.
+
+For operations with uncertain outcomes, keep enough durable state to reconcile before repeating work.
+
+```ts
+const pending = await journal.prepare({
+  operationId,
+  target,
+});
 
 try {
-  const receipt = await payments("submit payment", async () => {
-    return await client.submit(pending);
-  });
+  const receipt = await payments(
+    "submit payment",
+    async () => await client.submit(pending),
+  );
+
   await journal.confirm(operationId, receipt);
+
   return receipt;
 } catch (error) {
   await journal.markUnknown(operationId, error);
@@ -200,11 +1142,15 @@ try {
 }
 ```
 
-On restart, load pending operations and reconcile them before enabling new writes. In-memory flags and process supervisors cannot replace durable recovery state.
+On restart, load pending operations and reconcile them before enabling new writes.
 
-### Own failure at the outer application boundary
+In-memory flags and process supervisors cannot replace durable recovery state.
 
-A recurring process should distinguish a deferred cycle from a completed cycle and from a paused write state. Every started promise must either be awaited or have a rejection handler whose own failure is contained. A top-level catch gives controlled reporting and cleanup, but it cannot resume a loop that has already exited.
+Even when using `.retry()`, idempotency, durable reconciliation, and operation-specific error classification remain the application's responsibility.
+
+### Handle failures at the owning application boundary
+
+A recurring worker should distinguish completed work from a deferred cycle or a paused write state.
 
 ```ts
 while (!signal.aborted) {
@@ -214,6 +1160,7 @@ while (!signal.aborted) {
     });
   } catch (error) {
     const outcome = classifyCycleFailure(error);
+
     if (outcome === "fatal") throw error;
     if (outcome === "pause-writes") writesEnabled = false;
   }
@@ -222,115 +1169,17 @@ while (!signal.aborted) {
 }
 ```
 
-Global `uncaughtException` and `unhandledRejection` handlers are last-resort diagnostics, not authorization to continue mutating state after an unexpected failure.
+A top-level catch allows deliberate reporting and cleanup, but it cannot resume a loop that has already exited.
 
-### Timeouts are deadlines for waiting, not cancellation
+Every started promise must be awaited or have a rejection handler whose own failures are contained.
 
-A measurement timeout rejects when its timer fires and clears its timer when the measurement settles. It cannot stop blocking JavaScript, cancel a callback that is already running, or undo a submitted write. Pass an `AbortSignal` into cooperative I/O when cancellation matters. A timed-out callback may still finish later, so combining timeouts with retries can overlap attempts if the underlying operation does not stop.
+Global `uncaughtException` and `unhandledRejection` handlers should be treated as last-resort diagnostics, not permission to continue mutating state after an unexpected failure.
 
-## Custom logging
-
-The logger receives a discriminated `MeasureLogEvent` and an idempotent `next()` callback. Calling `next()` includes the built-in output. Omitting it suppresses or replaces the built-in output for that event.
-
-```ts
-import { configure } from "measure-fn";
-
-configure({
-  logger(event, next) {
-    if (event.label.startsWith("health:")) return;
-    if (
-      typeof event.data === "object" &&
-      event.data !== null &&
-      "internal" in event.data &&
-      event.data.internal === true
-    ) return;
-    next();
-  },
-  onLoggerError(error, event) {
-    void reportDiagnostic({ error, event });
-  },
-});
-```
-
-Logger exceptions, console failures, and rejected logger promises are contained. `onLoggerError` is also contained. Asynchronous loggers are best effort and are not awaited; the package does not provide a telemetry flush lifecycle. Keep `next()` synchronous when output order matters.
-
-Every event contains `id`, `rawId`, `scope`, `depth`, `label`, `traceId`, `parentId`, and `data`. `id` remains the scoped internal display identifier such as `api:a-a`; `rawId` is the hierarchy path such as `a-a`. The console intentionally renders that as `[api] a-a`. `traceId` identifies one local root within a loaded runtime and `parentId` identifies the direct parent. Add process, session, request, or other application identifiers when correlating separate runtimes.
-
-| Event | Normalized payload | Additional fields |
-| --- | --- | --- |
-| `start` | `data === value` | Start projection value. |
-| `annotation` | `data === value` | Annotation value. |
-| `success` | `data === result` | `duration`, `budget`, and `maxResultLength`. |
-| `error` | `data === error` | `duration`, `budget`, and `maxResultLength`. |
-
-Treat structured payloads as read-only. When summarization is disabled, logger events can contain original object references. Console redaction does not sanitize raw payloads sent to another sink.
-
-`colors: "auto"` is the default. It respects `NO_COLOR`, `FORCE_COLOR=0`, `FORCE_COLOR`, and terminal detection. Only the bracketed scope token is colored. Unscoped measurements remain uncolored. `timestamps: true` prepends a plain ISO timestamp.
-
-## Timing and helpers
-
-Durations start after the start mapper and start logger, and stop before the terminal mapper and logger. `.timed()` reports the same duration used by the corresponding success or error event. Parent timings include child work and child instrumentation.
-
-```ts
-const { result, duration } = await api.timed("fetch", async () => 42);
-const syncTiming = api.sync.timed("compute", () => 42);
-```
-
-A budget is a warning only. Timeout and retry delays must fit the platform timer range from `0` through `2,147,483,647` milliseconds.
-
-`.wrap()` preserves `this` and arguments for ordinary sync and async methods. It is not a constructor wrapper and does not copy custom function properties.
-
-`.batch()` processes a readonly array sequentially, preserves result order, and continues after item failures. A failed item contributes `null`; a successful `null` also appears as `null`, although success accounting remains correct. The action's end mapper receives `{ ok, total, results }` and item callbacks may be synchronous or asynchronous.
-
-```ts
-const results = await api.batch(
-  "process items",
-  [1, 2, 3],
-  async (item) => item * 2,
-  { every: 1 },
-);
-```
-
-Each instance's `.resetCounter()` resets its display root counter. It does not reset trace IDs or active child counters. The `.measure` and `.measureSync` aliases remain available on scoped instances.
-
-## Configuration and serialization
-
-Configuration is shared by instances from the loaded package. Set it during application initialization. Invalid numeric values and invalid regex strings throw before any part of a configuration update takes effect.
-
-```ts
-configure({
-  silent: false,
-  logger: null,
-  onLoggerError: null,
-  colors: "auto",
-  timestamps: false,
-  maxResultLength: 0,
-  summarize: false,
-  stripScopePrefix: false,
-  maxSummaryDepth: 4,
-  maxSummaryStringLength: 160,
-  summaryArraySample: 2,
-  summaryObjectKeys: 24,
-});
-```
-
-`MEASURE_SILENT=1` and `MEASURE_TIMESTAMPS=1` set their initial flags; `true` is also accepted. Silent spans still execute callbacks, deadlines, recovery, and nesting but skip observation mappers and event delivery. A span started while silent remains unobserved if configuration changes during its execution.
-
-Actions can override `summarize`, `maxResultLength`, and `stripScopePrefix`. `maxResultLength: 0` means unlimited display output. It is a string-output limit, not a traversal or allocation budget; large values should be summarized or projected through a small `end` result.
-
-`safeStringify()` and `summarizeForMeasure()` support cycles, repeated references, bigint, maps, sets, errors, dates, and common platform objects. Only ancestor cycles become `[Circular]`. Plain-object accessors are represented without invoking the getter, and user-defined `toJSON` methods are not invoked. Invalid dates and unreadable objects produce stable placeholders.
-
-The sensitive-key pattern covers common credential names such as passwords, tokens, authorization, cookies, and private keys. It is applied to object keys and string map keys. This is key-based redaction, not a secret scanner. Credentials embedded in free text, labels, URLs, stack strings, or arbitrarily named fields must be removed by the application before logging. If a credential has already appeared in shared logs, rotate it.
-
-## Compatibility and current guarantees
-
-The current package keeps Node asynchronous context in the Node entry and browser-safe context in the browser entry. Logger failures are isolated from application outcomes. Settled measurements clear owned deadline timers. `.timed()` and emitted durations use the same interval. Events expose local `traceId` and direct `parentId`. Sync APIs reject promise-like results and do not accept timeouts. Serialization avoids ordinary getters and custom `toJSON`, distinguishes repeated references from ancestor cycles, and applies stateless key-redaction checks.
-
-Normal callback results, default original-error propagation, explicit `catch` recovery, normalized `data` aliases, middleware delegation, method aliases, scoped event IDs, and zero runtime dependencies remain part of the contract. Browser automatic context remains synchronous; use `.bindContext()` when parentage must survive `await`.
-
-The repository intentionally keeps only two Markdown documents: this `README.md` for the public contract and `SKILL.md` for implementation guidance. Update one of these instead of creating a new Markdown note, migration file, example README, or recovery document.
+`measure-fn` intentionally does not own transaction reconciliation, background export, process supervision, or application shutdown policy.
 
 ## Development
+
+The repository's primary commands are:
 
 ```sh
 npm ci
@@ -339,9 +1188,20 @@ npm run test:bun
 npm pack
 ```
 
-`package-lock.json` is the canonical development lockfile. `npm run check` typechecks source and examples, builds both runtime entries, runs the Node and browser behavior suites, and validates an installed tarball in an isolated consumer. `test:bun` retains Bun compatibility coverage.
+`package-lock.json` is the canonical development lockfile.
 
-The optional real-browser suite uses Playwright on Node 20+:
+`npm run check`:
+
+- Typechecks source and examples.
+- Builds both runtime entries.
+- Runs Node.js and browser behavior suites.
+- Validates an installed tarball in an isolated consumer.
+
+`npm run test:bun` retains Bun compatibility coverage.
+
+### Real-browser tests
+
+An optional Playwright suite runs on Node.js 20+:
 
 ```sh
 npm install --no-save --ignore-scripts --package-lock=false playwright@1.62.1
@@ -349,49 +1209,50 @@ npx --no-install playwright install chromium --only-shell
 npm run test:browser:runtime
 ```
 
-On Linux, Playwright may require its `--with-deps` installation option. `MEASURE_BROWSER_EXECUTABLE` can select an existing Chromium binary and `MEASURE_BROWSER_REPORT` can save the JSON result. Browser tooling remains development-only and is not shipped as a runtime dependency.
+On Linux, Playwright may require its `--with-deps` installation option.
 
-See `examples/basic.ts`, `examples/browser.ts`, `examples/custom-logger.ts`, and `examples/production-orchestrator.ts` for runnable patterns. The examples follow the one-scope-definition-per-file convention.
+`MEASURE_BROWSER_EXECUTABLE` selects an existing Chromium binary.
+
+`MEASURE_BROWSER_REPORT` can save the JSON result.
+
+Browser testing tools are development-only and are not shipped as runtime dependencies.
+
+### Examples
+
+Runnable examples are available in:
+
+- `examples/basic.ts`
+- `examples/browser.ts`
+- `examples/custom-logger.ts`
+- `examples/production-orchestrator.ts`
+
+They follow the one-scope-definition-per-file convention.
+
+The repository keeps two Markdown documents: `README.md` for the public contract and `SKILL.md` for implementation guidance. Update those rather than creating additional migration, recovery, or example Markdown documents.
 
 ## License
 
 MIT.
 
-## Scope verbosity and bounded values
+## Legacy aliases
 
-```typescript
-const rpc = createMeasure("server:rpc-gate", {
-  level: "errors", slowThreshold: 1000, maxValueLength: 300,
-});
-configure({ maxValueLength: 300, errorDetails: true });
-await rpc({ start: () => "full diagnostic", maxValueLength: 0 }, () => largeValue);
+The following aliases remain available for backward compatibility:
+
+| Legacy name | Canonical API |
+| --- | --- |
+| `api.measure` | `api` |
+| `api.measureSync` | `api.sync` |
+| `maxResultLength` | `maxValueLength` |
+
+For example:
+
+```ts
+const api = createMeasure("api");
+
+await api.measure("load", async () => 42);
+api.measureSync("compute", () => 42);
 ```
 
-`level` supports `info` (default), `errors`, and `silent`. At `errors`, failures
-and successful calls above `slowThreshold` (milliseconds; default 1000) or their
-action `budget` print; slow success lines include their label. Starts and notes
-are suppressed. `MEASURE_LEVEL="server:rpc-gate=errors,*=info"` selects exact
-scopes with a wildcard fallback. Explicit scope options win over environment
-rules, which win over `configure({ level })`. Rules are read at module load;
-duplicate scopes use the last rule and malformed rules throw.
+These work, but new code should prefer `api()` and `api.sync()`.
 
-Scope levels filter only built-in console output: logger middleware receives all
-events, and `next()` respects the scope filter. `configure({ silent: true })`
-continues to disable all observation, including middleware.
-
-`maxValueLength` caps console start/note values and end values at 300 characters
-by default, including the final `…`; 0 allows full output. Action options override
-scope options, which override global configuration. The existing
-`maxResultLength` alias wins when both names are supplied at the same tier.
-`configure({ maxValueLength })` clears a previously configured global alias.
-Middleware payloads and operation results are not truncated; existing
-`summarize` and redaction settings still apply. `safeStringify` uses the global
-cap unless an explicit limit is supplied. Full diagnostic stacks and causes are
-exempt from the value cap.
-
-Error details remain opt-in through `errorDetails` or `MEASURE_ERROR_DETAILS=1`.
-When enabled, a WeakSet remembers the original thrown object even with
-summarization enabled: its stack and redacted cause print once at the first
-visible failure, while enclosing failures retain their compact `✗` line.
-Distinct errors with equal messages still print independently. Primitive thrown
-values cannot be remembered in a WeakSet and print at each failure.
+Use `maxValueLength` for new configurations. Both cap names remain supported, with the legacy name taking precedence when both are supplied at the same tier. The structured terminal event field retains the name `maxResultLength` for compatibility.
