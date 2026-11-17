@@ -1145,3 +1145,14 @@ describe("wrap keeps the function's shape", () => {
     expect(await obj.add(1)).toBe(11);
   });
 });
+
+test("a multi-line error message is indented under its span", async () => {
+  configure({ logger: null, silent: false, colors: false });
+  const out = captureConsole();
+  try {
+    await app("fail", async () => { throw new Error("first\nsecond"); });
+  } catch {}
+  out.restore();
+  const line = out.logs.find((l) => l.includes("✗"))!;
+  expect(line).toContain("first\n    second");
+});

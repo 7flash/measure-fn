@@ -115,7 +115,9 @@ function defaultLogger(event: MeasureLogEvent, policy: ConsolePolicy): void {
     console.log(`${id} ✓ ${level === "errors" ? `${truncate(event.label, cap)} ` : ""}${duration}${result ? ` → ${result}` : ""}${budget}`);
     return;
   }
-  console.log(`${id} ✗ ${duration} (${truncate(errorMessage(event.error), cap)})${budget}`);
+  // Indent continuation lines so a multi-line message stays under its span.
+  const message = truncate(errorMessage(event.error), cap).replace(/\r?\n/g, "\n    ");
+  console.log(`${id} ✗ ${duration} (${message})${budget}`);
   if (!options.errorDetails) return;
   const original = policy.originalError ?? event.error;
   if ((typeof original === "object" && original !== null) || typeof original === "function") {
