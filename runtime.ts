@@ -286,7 +286,8 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
         }
         const duration = needsDuration ? performance.now() - startedAt : 0;
         opts?.onDuration?.(duration);
-        if (canLogLifecycle()) {
+        // Decided when the span started: no end event without its start event.
+        if (logLifecycle) {
           const printed = endValue(action, result);
           emit({
             ...meta!,
@@ -354,7 +355,8 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
         }
         const duration = needsDuration ? performance.now() - startedAt : 0;
         opts?.onDuration?.(duration);
-        if (canLogLifecycle()) {
+        // Decided when the span started: no end event without its start event.
+        if (logLifecycle) {
           const printed = endValue(action, result);
           emit({
             ...meta!,
@@ -462,8 +464,9 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
       const settle = (type: "success" | "error", result: unknown) => {
         if (finished) return;
         finished = true;
-        if (type === "success" ? !canLogLifecycle() : !canLogErrors())
-          return;
+        // Decided when the generator started (logErrors covers both: a
+        // lifecycle event is only possible when errors can be logged).
+        if (!logErrors) return;
         const duration = logErrors ? performance.now() - startedAt : 0;
         if (type === "success") {
           const printed = endValue(action, result);

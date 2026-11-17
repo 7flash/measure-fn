@@ -1,3 +1,8 @@
+import {
+  options as configOptions,
+  logger as currentLogger,
+  silent as currentSilent,
+} from "./config.ts";
 import { describe, test, expect, beforeEach, spyOn } from "bun:test";
 import {
   configure,
@@ -899,5 +904,81 @@ describe("note boundaries", () => {
     expect(after.parentId).toBeUndefined();
     expect(bound.parentId).toBe(request.id);
     expect(bound.traceId).toBe(request.traceId);
+  });
+});
+
+describe("configure behaviour", () => {
+  test("partial and undefined updates leave unrelated settings alone", () => {
+    const middleware = () => {};
+    try {
+      configure({ level: "errors", maxValueLength: 40, logger: middleware });
+      configure({ colors: false, level: undefined, logger: undefined });
+      expect(configOptions.level).toBe("errors");
+      expect(configOptions.maxValueLength).toBe(40);
+      expect(configOptions.maxResultLength).toBeUndefined();
+      expect(currentLogger).toBe(middleware);
+    } finally {
+      configure({ level: "info", maxValueLength: 300, maxResultLength: 200, logger: null });
+    }
+  });
+
+  test("invalid updates throw descriptive errors and commit nothing", () => {
+    const before = configOptions.maxValueLength;
+    expect(() => configure({ silent: true, maxValueLength: -1 }))
+      .toThrow(RangeError);
+    expect(() => configure({ silent: true, level: "debug" as any }))
+      .toThrow("level must be info, errors, or silent");
+    expect(() => configure({ silent: true, logger: 42 as any }))
+      .toThrow("logger must be a function or null");
+    expect(configOptions.maxValueLength).toBe(before);
+    expect(currentSilent).toBe(false);
+    expect(currentLogger).toBeNull();
+  });
+
+  test("scope overrides global level and both length aliases", async () => {
+    const scoped = createMeasure("scope-config", {
+      level: "info", maxValueLength: 5, maxResultLength: 25,
+    });
+    configure({ level: "silent", maxResultLength: 4 });
+    const out = captureConsole();
+    try {
+      await scoped("work", async () => "abcdefghijklmnop");
+    } finally {
+      out.restore();
+      configure({ level: "info", maxResultLength: 200 });
+    }
+    expect(out.logs).toHaveLength(2);
+    expect(out.logs[1]).toContain('"abcdefghijklmnop"');
+  });
+
+  test("configuration during a span preserves the start-time silent decision", async () => {
+    const events: string[] = [];
+    try {
+      configure({ silent: false, logger: (event) => { events.push(event.type); } });
+      await app("outer", async () => {
+        configure({ colors: true });
+        await app("inner", async () => 1);
+      });
+      expect(events).toEqual(["start", "start", "success", "success"]);
+      events.length = 0;
+      configure({ silent: true });
+      await app("quiet", async () => { configure({ silent: false }); return 1; });
+      expect(events).toEqual([]);
+    } finally {
+      configure({ silent: false, logger: null, colors: false });
+    }
+  });
+
+  test("missing process is safe; unknown MEASURE_LEVEL still fails fast", () => {
+    const run = (code: string, level: string) => Bun.spawnSync(
+      [process.execPath, "-e", code],
+      { env: { ...process.env, MEASURE_LEVEL: level } },
+    );
+    expect(run("globalThis.process = undefined; await import('./config.ts')", "").exitCode)
+      .toBe(0);
+    const bad = run("await import('./config.ts')", "*=debug");
+    expect(bad.exitCode).not.toBe(0);
+    expect(new TextDecoder().decode(bad.stderr))
+      .toContain("level must be info, errors, or silent");
   });
 });
