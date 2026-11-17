@@ -20,9 +20,10 @@ const shouldUseColors = (): boolean => {
   if (options.colors === false) return false;
 
   if (typeof process === "undefined") return false;
-  if (process.env.NO_COLOR !== undefined) return false;
-  if (process.env.FORCE_COLOR === "0") return false;
-  if (process.env.FORCE_COLOR !== undefined) return true;
+  // Bundlers sometimes define `process` without `env` in the browser.
+  if (process.env?.NO_COLOR !== undefined) return false;
+  if (process.env?.FORCE_COLOR === "0") return false;
+  if (process.env?.FORCE_COLOR !== undefined) return true;
 
   return process.stdout?.isTTY === true;
 };

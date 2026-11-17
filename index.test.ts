@@ -982,3 +982,25 @@ describe("configure behaviour", () => {
       .toContain("level must be info, errors, or silent");
   });
 });
+
+describe("browser build", () => {
+  test("concurrent roots never adopt each other's children", async () => {
+    const { createMeasure: createBrowserMeasure } = await import("./browser.ts");
+    const web = createBrowserMeasure("web-race");
+    const events: MeasureLogEvent[] = [];
+    configure({ logger: (event) => { events.push(event); } });
+    try {
+      const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+      await Promise.all([
+        web.root("A", async () => { await tick(); await web("a-child", async () => 1); }),
+        web.root("B", async () => { await web("b-child", async () => { await tick(); return 2; }); }),
+      ]);
+    } finally {
+      configure({ logger: null });
+    }
+    const byLabel = (label: string) => events.find((e) => e.type === "start" && e.label === label)!;
+    expect(byLabel("b-child").parentId).toBe(byLabel("B").id);
+    // After an await the browser loses context: no parent, never the wrong one.
+    expect(byLabel("a-child").parentId).not.toBe(byLabel("B").id);
+  });
+});
