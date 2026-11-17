@@ -156,6 +156,9 @@ export type ConfigureOpts = MeasureScopeOptions & {
   /** Redact object keys matching this pattern during summary/stringify. */
   sensitiveKeyPattern?: RegExp | string | null;
 
+  /** Additionally redact matching text in built-in logged strings. */
+  sensitiveStringPattern?: RegExp | string | null;
+
   /** Maximum recursive depth for auto-summary. */
   maxSummaryDepth?: number;
 
@@ -167,6 +170,11 @@ export type ConfigureOpts = MeasureScopeOptions & {
 
   /** Number of object keys included in auto-summary. */
   summaryObjectKeys?: number;
+
+  /**
+   * Custom logger and onLoggerError callbacks receive raw event/error references.
+   * Callbacks must redact them before logging or exporting their contents.
+   */
 };
 
 export type TimedResult<T> = {

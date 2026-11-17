@@ -93,7 +93,7 @@ describe("hostile value serialization", () => {
     Object.defineProperty(error, "cause", { value: cause, enumerable: true });
     Object.defineProperty(cause, "cause", { value: error, enumerable: true });
     expect(() => safeStringify(error)).not.toThrow();
-    expect(safeStringify(error)).toContain("[Circula");
+    expect(safeStringify(error, 0)).toContain("[Circular]");
   });
 
   test("bounds very deep nesting", () => {

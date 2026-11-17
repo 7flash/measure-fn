@@ -1060,9 +1060,13 @@ The default sensitive-key pattern covers common credential names, including pass
 
 Redaction applies to object keys and string map keys.
 
-This is key-based redaction, not a general secret scanner.
+Every string the built-in logger prints or serializes (labels, values, URL objects, error messages, stacks and causes) also has URL credentials removed: userinfo (`https://user:pass@host`) and credential-looking query parameters (`key`, `token`, `api_key`, `secret`, `password`, …) become `[REDACTED]`. Add your own pattern for application-specific secrets:
 
-Credentials embedded in free text, labels, URLs, stack strings, or arbitrarily named fields may remain visible. Remove or sanitize them at the application boundary before logging.
+```ts
+configure({ sensitiveStringPattern: /sk_live_[A-Za-z0-9]+/g });
+```
+
+This is not a general secret scanner. A secret in free text that matches neither rule, or in an arbitrarily named field, may remain visible. Remove or sanitize it at the application boundary before logging.
 
 Custom middleware may receive raw payload references. Do not assume that built-in console redaction has already sanitized middleware data.
 

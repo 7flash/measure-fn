@@ -1,4 +1,9 @@
-import { integer, isSensitiveKey, options } from "./config.js";
+import {
+  integer,
+  isSensitiveKey,
+  options,
+  redactSensitiveString,
+} from "./config.js";
 
 const UNREADABLE = "[Unserializable]";
 const ACCESSOR = "[Accessor]";
@@ -64,8 +69,10 @@ function snapshot(
         return Number.isFinite(value) ? value : String(value);
       case "boolean":
         return value;
-      case "string":
-        return summary ? shorten(value, options.maxSummaryStringLength) : value;
+      case "string": {
+        const safe = redactSensitiveString(value);
+        return summary ? shorten(safe, options.maxSummaryStringLength) : safe;
+      }
       case "symbol":
         return String(value);
       case "function":
@@ -88,7 +95,7 @@ function snapshot(
           : Date.prototype.toISOString.call(value);
       }
       if (typeof URL !== "undefined" && value instanceof URL)
-        return URL.prototype.toString.call(value);
+        return redactSensitiveString(URL.prototype.toString.call(value));
       if (value instanceof Map) {
         const sample: unknown[] = [];
         const limit = summary ? options.summaryArraySample : FULL_ITEM_LIMIT;
@@ -170,7 +177,7 @@ function snapshot(
         // Redact before reading even a data property.
         put(
           out,
-          key,
+          redactSensitiveString(key),
           isSensitiveKey(key) ? "[omitted]" : visit(ownValue(object, key)),
         );
       }
@@ -227,7 +234,7 @@ export function errorMessage(error: unknown): string {
   if (typeof error === "string") return error;
   if (typeof error === "object" && error !== null) {
     const message = ownValue(error, "message");
-    if (typeof message === "string") return message;
+    if (typeof message === "string") return redactSensitiveString(message);
   }
   return stringifyForLog(error, 0) || "Unknown error";
 }

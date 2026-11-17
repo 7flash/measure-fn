@@ -1,4 +1,10 @@
-import { logger, onLoggerError, options, silent } from "./config.js";
+import {
+  logger,
+  onLoggerError,
+  options,
+  redactSensitiveString,
+  silent,
+} from "./config.js";
 import { formatDuration } from "./format.js";
 import { errorMessage, errorStack, ownValue, stringifyForLog } from "./serialization.js";
 import type { MeasureLogEvent, MeasureScopeOptions } from "./types.js";
@@ -56,8 +62,10 @@ const scopeColor = (scope: string): number => {
 };
 
 const formatLogId = (event: MeasureLogEvent): string => {
-  if (!event.scope) return `[${event.rawId}]`;
-  return `${color(scopeColor(event.scope), `[${event.scope}]`)} ${event.rawId}`;
+  const rawId = redactSensitiveString(event.rawId);
+  if (!event.scope) return `[${rawId}]`;
+  const scope = redactSensitiveString(event.scope);
+  return `${color(scopeColor(event.scope), `[${scope}]`)} ${rawId}`;
 };
 
 const localTimestamp = (date: Date): string => {
@@ -74,8 +82,12 @@ const timestampPrefix = (): string => {
 
 export type ConsolePolicy = MeasureScopeOptions & { originalError?: unknown };
 const printedErrors = new WeakSet<object>();
-const truncate = (text: string, cap: number) =>
-  cap > 0 && text.length > cap ? text.slice(0, cap - 1) + "…" : text;
+const truncate = (text: string, cap: number) => {
+  const safe = redactSensitiveString(text);
+  return cap > 0 && safe.length > cap
+    ? safe.slice(0, cap - 1) + "…"
+    : safe;
+};
 
 function defaultLogger(event: MeasureLogEvent, policy: ConsolePolicy): void {
   const level = policy.level ?? options.level;

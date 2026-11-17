@@ -25,6 +25,7 @@ export const options = {
   summaryArraySample: 2,
   summaryObjectKeys: 24,
   sensitiveKeyPattern: DEFAULT_SENSITIVE_KEY as RegExp | null,
+  sensitiveStringPattern: null as RegExp | null,
 };
 
 export let silent =
@@ -141,6 +142,18 @@ export function configure(opts: ConfigureOpts): void {
         "sensitiveKeyPattern must be a RegExp, string, or null",
       );
   }
+  if (opts.sensitiveStringPattern !== undefined) {
+    const pattern = opts.sensitiveStringPattern;
+    if (pattern === null) next.sensitiveStringPattern = null;
+    else if (typeof pattern === "string")
+      next.sensitiveStringPattern = new RegExp(pattern);
+    else if (pattern instanceof RegExp)
+      next.sensitiveStringPattern = new RegExp(pattern.source, pattern.flags);
+    else
+      throw new TypeError(
+        "sensitiveStringPattern must be a RegExp, string, or null",
+      );
+  }
   Object.assign(options, next);
   if (opts.silent !== undefined) silent = opts.silent;
   if (opts.logger !== undefined) logger = opts.logger;
@@ -156,4 +169,24 @@ export function isSensitiveKey(key: string): boolean {
   } finally {
     pattern.lastIndex = 0;
   }
+}
+
+/** Redact credential-looking URL components and optional application patterns. */
+export function redactSensitiveString(value: string): string {
+  let result = value
+    .replace(
+      /([a-z][a-z\d+.-]*:\/\/)[^/?#\s@]*@/gi,
+      "$1[REDACTED]@",
+    )
+    .replace(
+      /([?&])((?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth(?:orization)?|token|key|secret|password|passwd|signature|sig|client[_-]?secret|credential|jwt)(?:\[[^\]]+\])?)=([^&#\s]*)/gi,
+      "$1$2=[REDACTED]",
+    );
+
+  const pattern = options.sensitiveStringPattern;
+  if (pattern) {
+    const flags = `${pattern.flags.replace(/[gy]/g, "")}g`;
+    result = result.replace(new RegExp(pattern.source, flags), "[REDACTED]");
+  }
+  return result;
 }
