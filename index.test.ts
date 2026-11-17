@@ -765,3 +765,13 @@ describe("compactIds", () => {
       .toThrow("compactIds must be a boolean");
   });
 });
+
+test("formatDuration rounds across unit boundaries and adds hours", () => {
+  expect(formatDuration(999.996)).toBe("1.0s");
+  expect(formatDuration(999.99)).toBe("999.99ms");
+  expect(formatDuration(59_960)).toBe("1m 0s");
+  expect(formatDuration(59_940)).toBe("59.9s");
+  expect(formatDuration(3_600_000)).toBe("1h 0m");
+  expect(formatDuration(7_530_000)).toBe("2h 6m");
+  expect(() => formatDuration(-0.01)).toThrow(RangeError);
+});
