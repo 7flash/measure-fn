@@ -12,6 +12,7 @@
 - Wrapped generators now start their span on the first `next()` and finish when iteration completes, throws, or returns early, measuring consumption rather than iterator creation.
 - Nested operations during generator consumption now appear under the generator's span.
 - Fixed synchronous callbacks and `end()` / `error()` mappers invoking `then()` on non-Promise thenables when checking for asynchronous results.
+- Fixed logging freezing on a huge sparse array (length 1e9) and fully walking large Maps, Sets and typed arrays: at most 1000 items of one value are read, and typed arrays and Buffers print as `{ type, byteLength }`.
 - Fixed error output exceeding `maxValueLength`; error messages, details, and causes now respect the configured limit.
 - Added optional compact span IDs with `configure({ compactIds: true })` or `createMeasure(scope, { compactIds: true })`.
 - Compact IDs use short per-trace values such as `#a` and `#b` instead of growing with the full ancestor path, while preserving exact `parentId` and `traceId` values.
