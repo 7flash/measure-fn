@@ -477,6 +477,14 @@ Avoid stacking independent retry loops in a transport, an SDK, and the applicati
 
 For HTTP reads, remember that a rejected `fetch()` may have no response status at all. A policy based only on HTTP status can miss connection resets and failures before headers arrive. A repeatable-read retry boundary should cover connection, response consumption, and decoding, with an overall deadline and cooperative cancellation where available.
 
+
+Pass `signal` to cancel during shutdown: aborting stops the wait between attempts and starts no new attempt, and the retry rejects with the abort reason.
+
+```ts
+const controller = new AbortController();
+await api.retry("fetch feed", { attempts: 5, delay: 2000, signal: controller.signal }, fetchFeed);
+```
+
 ### batch(action, items, fn, opts?)
 
 `.batch()` processes items sequentially, keeps their original order, and continues after individual failures.

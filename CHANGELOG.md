@@ -16,6 +16,7 @@
 - Durations no longer print as `1000.00ms` or `60.0s` at unit boundaries, and an hour or more prints as `2h 6m`.
 - Fixed error output exceeding `maxValueLength`; error messages, details, and causes now respect the configured limit.
 - Logged strings (labels, values, URLs, error messages, stacks, causes) now have URL credentials (userinfo and key/token/secret-style query parameters) replaced with `[REDACTED]`; `configure({ sensitiveStringPattern })` adds your own pattern.
+- Added `signal` to `.retry()` options: an `AbortSignal` that stops waiting between attempts.
 - Added optional compact span IDs with `configure({ compactIds: true })` or `createMeasure(scope, { compactIds: true })`.
 - Compact IDs use short per-trace values such as `#a` and `#b` instead of growing with the full ancestor path, while preserving exact `parentId` and `traceId` values.
 - Compact IDs are disabled by default, so existing span IDs and log output remain unchanged.

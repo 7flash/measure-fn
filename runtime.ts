@@ -36,8 +36,19 @@ const actionObject = <T>(
   action: MeasureAction<T>,
 ): MeasureActionObject<T> | undefined =>
   typeof action === "object" && action !== null ? action : undefined;
-const sleep = (ms: number) =>
-  new Promise<void>((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal!.reason);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 const summarize = (action: AnyAction, value: unknown): unknown =>
   (actionObject(action)?.summarize ?? options.summarize)
     ? summarizeForMeasure(value)
@@ -579,6 +590,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
         scopeOptions,
       );
       for (let i = 0; i < attempts; i++) {
+        if (opts.signal?.aborted) throw opts.signal.reason;
         const suffix = `[${i + 1}/${attempts}]`;
         const attemptAction =
           typeof action === "string"
@@ -603,7 +615,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
             if (!retry) break;
           }
           if (delay > 0)
-            await sleep(Math.min(MAX_TIMER_MS, delay * backoff ** i));
+            await sleep(Math.min(MAX_TIMER_MS, delay * backoff ** i), opts.signal);
         }
       }
       const recover = actionObject(action)?.catch;

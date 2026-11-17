@@ -775,3 +775,35 @@ test("formatDuration rounds across unit boundaries and adds hours", () => {
   expect(formatDuration(7_530_000)).toBe("2h 6m");
   expect(() => formatDuration(-0.01)).toThrow(RangeError);
 });
+
+test("retry stops waiting and attempting when its signal aborts", async () => {
+  const controller = new AbortController();
+  let attempts = 0;
+  const out = captureConsole();
+  const started = Date.now();
+  const failure = app.measure.retry(
+    "Slow retry",
+    { attempts: 5, delay: 10_000, signal: controller.signal },
+    async () => {
+      attempts++;
+      throw new Error("down");
+    },
+  );
+  setTimeout(() => controller.abort(new Error("shutting down")), 20);
+  await expect(failure).rejects.toThrow("shutting down");
+  out.restore();
+  expect(attempts).toBe(1);
+  expect(Date.now() - started).toBeLessThan(2000);
+});
+
+test("retry with an already aborted signal does not run", async () => {
+  const controller = new AbortController();
+  controller.abort(new Error("cancelled"));
+  let ran = false;
+  await expect(
+    app.measure.retry("Never", { signal: controller.signal }, async () => {
+      ran = true;
+    }),
+  ).rejects.toThrow("cancelled");
+  expect(ran).toBe(false);
+});

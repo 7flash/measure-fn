@@ -187,6 +187,8 @@ export type RetryOpts = {
   delay?: number;
   backoff?: number;
   retryIf?: (error: unknown, attempt: number) => MaybePromise<boolean>;
+  /** Aborting stops waiting between attempts and starts no new attempt. */
+  signal?: AbortSignal;
 };
 
 export type BatchOpts = {
