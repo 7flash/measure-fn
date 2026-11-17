@@ -420,7 +420,7 @@ await api(
 
 A timeout is a deadline, **not cancellation**.
 
-When the timer fires, the measurement rejects. The timer is cleared when the measurement settles.
+When the timer fires, the measurement rejects with an error whose `name` is `"TimeoutError"`, so it can be told apart from the action's own failures (`error.name === "TimeoutError"`). The timer is cleared when the measurement settles. With `.retry()`, each attempt has its own deadline.
 
 A timeout does not:
 

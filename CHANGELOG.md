@@ -22,6 +22,7 @@
 - Compact IDs are disabled by default, so existing span IDs and log output remain unchanged.
 - Fixed: `maxValueLength` truncation no longer cuts an emoji (surrogate pair) in half.
 - Fixed: a span started while silent no longer sends a lone `success` event if `configure({ silent: false })` runs before it ends.
+- Timeout errors now have `name: "TimeoutError"` (the message is unchanged), so they can be told apart from the action's own errors.
 - Rewrote the README with installation instructions, a quick-start example, Node.js and Bun guidance, browser context-binding guidance, and an updated API reference covering retries, batch results, generators, logging, and configuration.
 
 ## 5.2.0

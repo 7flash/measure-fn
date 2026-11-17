@@ -1004,3 +1004,96 @@ describe("browser build", () => {
     expect(byLabel("a-child").parentId).not.toBe(byLabel("B").id);
   });
 });
+
+describe("timeout contract", () => {
+  test("names the error, clears the timer, and leaves work uncancelled", async () => {
+    configure({ silent: true });
+    let release!: () => void;
+    let completed = false;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const clear = spyOn(globalThis, "clearTimeout");
+    try {
+      await expect(
+        app.measure({ start: () => "blocked", timeout: 5 }, async () => {
+          await blocked;
+          completed = true;
+        }),
+      ).rejects.toMatchObject({
+        name: "TimeoutError",
+        message: `Timeout (${formatDuration(5)})`,
+      });
+      expect(completed).toBe(false);
+      expect(clear).toHaveBeenCalled();
+    } finally {
+      release();
+      clear.mockRestore();
+    }
+    await blocked;
+    expect(completed).toBe(true);
+  });
+
+  test("clears deadlines after success and original callback failure", async () => {
+    configure({ silent: true });
+    const clear = spyOn(globalThis, "clearTimeout");
+    try {
+      const action = { start: () => "fast", timeout: 1_000 };
+      expect(await app.measure(action, () => 42)).toBe(42);
+      const before = clear.mock.calls.length;
+      expect(before).toBeGreaterThan(0);
+      const original = new Error("original");
+      await expect(app.measure(action, () => { throw original; }))
+        .rejects.toBe(original);
+      expect(clear.mock.calls.length).toBeGreaterThan(before);
+    } finally {
+      clear.mockRestore();
+    }
+  });
+
+  test("retry times out each attempt and recovers only at the end", async () => {
+    configure({ silent: true });
+    const releases: Array<() => void> = [];
+    let recoveryCalls = 0;
+    try {
+      const result = await app.measure.retry(
+        {
+          start: () => "retry",
+          timeout: 5,
+          catch: (error) => {
+            recoveryCalls++;
+            expect(error).toMatchObject({ name: "TimeoutError" });
+            return "fallback";
+          },
+        },
+        { attempts: 2, delay: 0 },
+        () => new Promise<string>((resolve) => {
+          releases.push(() => resolve("late"));
+        }),
+      );
+      expect(result).toBe("fallback");
+      expect(releases).toHaveLength(2);
+      expect(recoveryCalls).toBe(1);
+    } finally {
+      releases.forEach((release) => release());
+    }
+  });
+
+  test("zero disables timeout; invalid and sync timeout reject before running", async () => {
+    configure({ silent: true });
+    expect(await app.measure({ start: () => "zero", timeout: 0 }, () => 42))
+      .toBe(42);
+    for (const timeout of [-1, NaN, Infinity, 2_147_483_648]) {
+      let invoked = false;
+      await expect(app.measure({ start: () => "bad", timeout }, () => {
+        invoked = true;
+        return 1;
+      })).rejects.toThrow(RangeError);
+      expect(invoked).toBe(false);
+    }
+    let invoked = false;
+    expect(() => app.measureSync({ start: () => "sync", timeout: 0 } as any, () => {
+      invoked = true;
+      return 1;
+    })).toThrow("measureSync does not support timeout");
+    expect(invoked).toBe(false);
+  });
+});
