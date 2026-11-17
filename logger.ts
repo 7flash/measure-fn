@@ -84,9 +84,11 @@ export type ConsolePolicy = MeasureScopeOptions & { originalError?: unknown };
 const printedErrors = new WeakSet<object>();
 const truncate = (text: string, cap: number) => {
   const safe = redactSensitiveString(text);
-  return cap > 0 && safe.length > cap
-    ? safe.slice(0, cap - 1) + "…"
-    : safe;
+  if (cap <= 0 || safe.length <= cap) return safe;
+  let end = cap - 1;
+  // Do not cut between the halves of a UTF-16 surrogate pair (emoji).
+  if (end > 0 && (safe.codePointAt(end - 1) ?? 0) > 0xffff) end--;
+  return safe.slice(0, end) + "…";
 };
 
 function defaultLogger(event: MeasureLogEvent, policy: ConsolePolicy): void {

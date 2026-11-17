@@ -807,3 +807,97 @@ test("retry with an already aborted signal does not run", async () => {
   ).rejects.toThrow("cancelled");
   expect(ran).toBe(false);
 });
+
+describe("note boundaries", () => {
+  test("outside a span creates a root annotation", () => {
+    const events: MeasureLogEvent[] = [];
+    configure({ logger: (event) => { events.push(event); } });
+    expect(app.note("ready")).toBeUndefined();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: "annotation", id: "app:a", rawId: "a", depth: 0,
+      label: "ready", value: "ready", data: "ready",
+    });
+    expect(events[0]!.parentId).toBeUndefined();
+  });
+
+  test("a silent scope hides console output, not middleware events", async () => {
+    const events: MeasureLogEvent[] = [];
+    configure({ logger: (event, next) => { events.push(event); next(); } });
+    const quiet = createMeasure("quiet", { level: "silent" });
+    const out = captureConsole();
+    await quiet.root("parent", async () => { quiet.note("child"); });
+    out.restore();
+    expect(out.logs).toEqual([]);
+    const parent = events.find((e) => e.type === "start")!;
+    expect(events.find((e) => e.type === "annotation")).toMatchObject({
+      id: "quiet:a-a", parentId: parent.id,
+      traceId: parent.traceId, depth: 1, label: "child",
+    });
+  });
+
+  test("global silent mode skips annotation mappers and delivery", () => {
+    const events: MeasureLogEvent[] = [];
+    let called = false;
+    configure({ silent: true, logger: (event) => { events.push(event); } });
+    app.note({ start: () => { called = true; throw Error("unexpected"); } });
+    expect(called).toBe(false);
+    expect(events).toEqual([]);
+  });
+
+  test("a throwing start mapper yields a diagnostic instead of throwing", () => {
+    const events: MeasureLogEvent[] = [];
+    configure({ logger: (event) => { events.push(event); } });
+    expect(() => app.note({ start: () => { throw Error("mapper failed"); } }))
+      .not.toThrow();
+    expect(events[0]).toMatchObject({
+      type: "annotation", value: { startMapperError: "mapper failed" },
+      data: { startMapperError: "mapper failed" },
+    });
+    expect(events[0]!.label).toContain("startMapperError");
+  });
+
+  test("maxValueLength preserves Unicode and full middleware payloads", () => {
+    const label = "12345😀" + "x".repeat(4096);
+    const events: MeasureLogEvent[] = [];
+    configure({ maxValueLength: 7, logger: (event, next) => {
+      events.push(event); next();
+    } });
+    const out = captureConsole();
+    app.note(label);
+    out.restore();
+    expect(out.logs).toEqual(["[app] a = 12345…"]);
+    expect(events[0]).toMatchObject({
+      type: "annotation", label, value: label, data: label,
+    });
+  });
+
+  test("per-note caps avoid splitting surrogate pairs too", () => {
+    const out = captureConsole();
+    app.note({ start: () => "abcd😀" + "x".repeat(2048), maxValueLength: 6 });
+    out.restore();
+    expect(out.logs).toEqual(["[app] a = abcd…"]);
+  });
+
+  test("browser context is lost after await unless explicitly bound", async () => {
+    const { createMeasure: createBrowserMeasure } = await import("./browser.ts");
+    const browser = createBrowserMeasure("web-note");
+    const events: MeasureLogEvent[] = [];
+    configure({ logger: (event) => { events.push(event); } });
+    await browser.root("request", async () => {
+      browser.note("before");
+      const bound = browser.bindContext();
+      await Promise.resolve();
+      browser.note("after");
+      bound.note("bound");
+    });
+    const request = events.find((e) => e.label === "request")!;
+    const before = events.find((e) => e.label === "before")!;
+    const after = events.find((e) => e.label === "after")!;
+    const bound = events.find((e) => e.label === "bound")!;
+    expect(before.parentId).toBe(request.id);
+    expect(after.parentId).toBeUndefined();
+    expect(bound.parentId).toBe(request.id);
+    expect(bound.traceId).toBe(request.traceId);
+  });
+});
