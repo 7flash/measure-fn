@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (6.0.0 proposed: wrap() on generators now returns an iterator)
+## 6.0.0 (2026-11-17)
 
 - Fixed `.retry()` ignoring `retryIf` in 5.3.1, which meant failed operations were always retried and could repeat writes even when the caller intended to stop.
 - Added support for `retryIf(error, attempt)` after each failed attempt except the last, stopping retries when it returns `false` and throwing a `TypeError` if it returns a non-boolean value.
