@@ -167,6 +167,17 @@ async function withTimeout<T>(
 }
 
 /** Each platform entry owns one storage and one monotonically increasing trace counter. */
+/**
+ * The wrapper keeps the original's name and parameter count: stack traces
+ * stay readable, and code that checks fn.length (Express error handlers,
+ * for example) still sees the same function shape.
+ */
+function keepIdentity<F extends Function>(wrapper: F, original: Function): F {
+  Object.defineProperty(wrapper, "name", { value: original.name, configurable: true });
+  Object.defineProperty(wrapper, "length", { value: original.length, configurable: true });
+  return wrapper;
+}
+
 export function createMeasureRuntime(storage: ContextStorage<Span>) {
   let traceCounter = 0;
   // Weak keys allow inactive traces to be collected.
@@ -409,9 +420,9 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
       action: MeasureAction<R>,
       fn: (this: This, ...args: A) => R,
     ) =>
-      function (this: This, ...args: A): R {
+      keepIdentity(function (this: This, ...args: A): R {
         return runSync(action, () => fn.apply(this, args));
-      };
+      }, fn);
 
     const m = (async (action: AnyAction, fn?: () => unknown) => {
       if (fn === undefined) {
@@ -563,17 +574,17 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
       if (kind === "[object GeneratorFunction]" ||
           kind === "[object AsyncGeneratorFunction]") {
         const isAsync = kind === "[object AsyncGeneratorFunction]";
-        return function (this: unknown, ...args: unknown[]) {
+        return keepIdentity(function (this: unknown, ...args: unknown[]) {
           return wrapIterator(
             action,
             () => fn.apply(this, args) as Iterator<unknown> | AsyncIterator<unknown>,
             isAsync,
           );
-        };
+        }, fn);
       }
-      return function (this: unknown, ...args: unknown[]): Promise<unknown> {
+      return keepIdentity(function (this: unknown, ...args: unknown[]): Promise<unknown> {
         return run(action, () => fn.apply(this, args));
-      };
+      }, fn);
     }) as MeasureFn["wrap"];
 
     m.retry = async (action, opts, fn) => {

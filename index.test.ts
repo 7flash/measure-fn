@@ -1128,3 +1128,20 @@ describe("batch concurrency", () => {
     await expect(app.batch("work", [1], async () => 1, { concurrency: 0 })).rejects.toThrow();
   });
 });
+
+describe("wrap keeps the function's shape", () => {
+  test("name, length and this survive wrapping (async, sync, generator)", async () => {
+    configure({ silent: true });
+    const named = async function fetchUser(a: number, b: number) { return a + b; };
+    const w = app.wrap("fetch", named);
+    expect(w.name).toBe("fetchUser");
+    expect(w.length).toBe(2);
+    expect(await w(1, 2)).toBe(3);
+    const s = app.measureSync.wrap("sum", function sum3(a: number, b: number, c: number) { return a + b + c; });
+    expect([s.name, s.length]).toEqual(["sum3", 3]);
+    const g = app.wrap("gen", function* count(n: number) { yield n; });
+    expect([g.name, g.length]).toEqual(["count", 1]);
+    const obj = { base: 10, add: app.wrap("add", async function (this: { base: number }, x: number) { return this.base + x; }) };
+    expect(await obj.add(1)).toBe(11);
+  });
+});

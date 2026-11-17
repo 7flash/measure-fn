@@ -24,6 +24,7 @@
 - Fixed: a span started while silent no longer sends a lone `success` event if `configure({ silent: false })` runs before it ends.
 - Timeout errors now have `name: "TimeoutError"` (the message is unchanged), so they can be told apart from the action's own errors.
 - Added `concurrency` to `.batch()` options: run up to N items at once (default 1); results keep input order.
+- Fixed: `wrap()` keeps the wrapped function's `name` and `length` (they were empty and 0), so stack traces stay readable and code that checks `fn.length` sees the same function.
 - Rewrote the README with installation instructions, a quick-start example, Node.js and Bun guidance, browser context-binding guidance, and an updated API reference covering retries, batch results, generators, logging, and configuration.
 
 ## 5.2.0
