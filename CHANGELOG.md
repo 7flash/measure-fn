@@ -21,6 +21,7 @@
 - Compact IDs use short per-trace values such as `#a` and `#b` instead of growing with the full ancestor path, while preserving exact `parentId` and `traceId` values.
 - Compact IDs are disabled by default, so existing span IDs and log output remain unchanged.
 - Fixed: `maxValueLength` truncation no longer cuts an emoji (surrogate pair) in half.
+- Fixed: a span started while silent no longer sends a lone `success` event if `configure({ silent: false })` runs before it ends.
 - Rewrote the README with installation instructions, a quick-start example, Node.js and Bun guidance, browser context-binding guidance, and an updated API reference covering retries, batch results, generators, logging, and configuration.
 
 ## 5.2.0
