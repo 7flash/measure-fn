@@ -44,6 +44,11 @@ function shorten(text: string, max: number): string {
   return max > 0 && text.length > max ? text.slice(0, max - 1) + "…" : text;
 }
 
+/** Even unsummarized output is cut to maxValueLength when printed, so never
+ *  walk more than this many items of one collection or object. A sparse
+ *  array with length 1e9 used to freeze logging. */
+const FULL_ITEM_LIMIT = 1000;
+
 function snapshot(
   value: unknown,
   summary: boolean,
@@ -86,7 +91,7 @@ function snapshot(
         return URL.prototype.toString.call(value);
       if (value instanceof Map) {
         const sample: unknown[] = [];
-        const limit = summary ? options.summaryArraySample : Infinity;
+        const limit = summary ? options.summaryArraySample : FULL_ITEM_LIMIT;
         // Do not materialize the whole collection just to take a small sample.
         if (limit > 0)
           for (const [key, item] of Map.prototype.entries.call(value)) {
@@ -98,19 +103,19 @@ function snapshot(
             ]);
             if (sample.length >= limit) break;
           }
-        return summary
+        return summary || value.size > sample.length
           ? { type: "map", size: value.size, sample }
           : { type: "map", entries: sample };
       }
       if (value instanceof Set) {
         const sample: unknown[] = [];
-        const limit = summary ? options.summaryArraySample : Infinity;
+        const limit = summary ? options.summaryArraySample : FULL_ITEM_LIMIT;
         if (limit > 0)
           for (const item of Set.prototype.values.call(value)) {
             sample.push(visit(item));
             if (sample.length >= limit) break;
           }
-        return summary
+        return summary || value.size > sample.length
           ? { type: "set", size: value.size, sample }
           : { type: "set", values: sample };
       }
@@ -120,15 +125,15 @@ function snapshot(
         const count =
           summary && value.length > 8
             ? Math.min(value.length, options.summaryArraySample)
-            : value.length;
+            : Math.min(value.length, FULL_ITEM_LIMIT);
         const items: unknown[] = [];
         for (let i = 0; i < count; i++)
           items.push(visit(ownValue(value, String(i))));
-        return summary && value.length > 8
+        return (summary && value.length > 8) || value.length > count
           ? { type: "array", length: value.length, sample: items }
           : items;
       }
-      if (summary && ArrayBuffer.isView(value)) {
+      if (ArrayBuffer.isView(value)) {
         return { type: "buffer-view", byteLength: value.byteLength };
       }
       const out: Record<string, unknown> = {};
@@ -158,7 +163,9 @@ function snapshot(
         }
       }
       const keys = Object.keys(object);
-      const limit = summary ? options.summaryObjectKeys : keys.length;
+      const limit = summary
+        ? options.summaryObjectKeys
+        : Math.min(keys.length, FULL_ITEM_LIMIT);
       for (const key of keys.slice(0, limit)) {
         // Redact before reading even a data property.
         put(
