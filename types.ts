@@ -193,6 +193,8 @@ export type RetryOpts = {
 
 export type BatchOpts = {
   every?: number;
+  /** Items run at once (default 1, one after another). Results keep item order. */
+  concurrency?: number;
 };
 
 export type BatchSummary<R> = {

@@ -487,7 +487,7 @@ await api.retry("fetch feed", { attempts: 5, delay: 2000, signal: controller.sig
 
 ### batch(action, items, fn, opts?)
 
-`.batch()` processes items sequentially, keeps their original order, and continues after individual failures.
+`.batch()` processes items one at a time (or a few at once with `concurrency`), keeps their original order, and continues after individual failures.
 
 ```ts
 const results = await api.batch(
@@ -505,6 +505,8 @@ Its callback receives `(item, index)` and may return a value synchronously or as
 The input is a readonly array. The returned promise resolves to an array of results.
 
 The optional `every` number controls periodic batch progress reporting.
+
+The optional `concurrency` number (default `1`) runs up to that many items at once, for example `{ concurrency: 4 }` for network calls. Results still follow the input order, and failures still become `null`.
 
 A failed item contributes `null` and processing continues.
 

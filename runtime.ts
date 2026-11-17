@@ -630,7 +630,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
       action: MeasureAction<BatchSummary<R>>,
       items: readonly T[],
       fn: (item: T, index: number) => MaybePromise<R>,
-      opts?: { every?: number },
+      opts?: { every?: number; concurrency?: number },
     ) => {
       const total = items.length;
       const every = integer(
@@ -638,6 +638,7 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
         opts?.every ?? Math.max(1, Math.ceil(total / 5)),
         1,
       );
+      const concurrency = integer("concurrency", opts?.concurrency ?? 1, 1);
       const batchAction: MeasureAction<BatchSummary<R>> = {
         ...(actionObject(action) ?? {}),
         start: () => {
@@ -650,27 +651,36 @@ export function createMeasureRuntime(storage: ContextStorage<Span>) {
       };
       const summary = await m(batchAction, async () => {
         const span = storage.getStore();
-        const results: (R | null)[] = [];
+        const results: (R | null)[] = new Array(total).fill(null);
         let ok = 0;
-        for (let i = 0; i < total; i++) {
-          try {
-            // Re-enter for each callback: browser context does not survive await.
-            results.push(
-              await (span
+        let done = 0;
+        let next = 0;
+        // Up to `concurrency` items run at once; results keep item order.
+        const worker = async () => {
+          while (next < total) {
+            const i = next++;
+            try {
+              // Re-enter for each callback: browser context does not survive await.
+              results[i] = await (span
                 ? storage.run(span, () => fn(items[i]!, i))
-                : fn(items[i]!, i)),
-            );
-            ok++;
-          } catch {
-            results.push(null);
+                : fn(items[i]!, i));
+              ok++;
+            } catch {
+              results[i] = null;
+            }
+            done++;
+            if (done % every === 0 && done < total) {
+              const progress = `${done}/${total} (${ok} ok)`;
+              const report = () =>
+                createImpl(scope, counter, undefined, scopeOptions).note(progress);
+              if (span) storage.run(span, report);
+              else report();
+            }
           }
-          if ((i + 1) % every === 0 && i + 1 < total) {
-            const report = () =>
-              createImpl(scope, counter, undefined, scopeOptions).note(`${i + 1}/${total} (${ok} ok)`);
-            if (span) storage.run(span, report);
-            else report();
-          }
-        }
+        };
+        await Promise.all(
+          Array.from({ length: Math.min(concurrency, total) }, worker),
+        );
         return { ok, total, results };
       });
       return summary.results;

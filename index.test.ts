@@ -1097,3 +1097,34 @@ describe("timeout contract", () => {
     expect(invoked).toBe(false);
   });
 });
+
+describe("batch concurrency", () => {
+  test("runs up to N items at once and keeps result order", async () => {
+    configure({ silent: true });
+    let running = 0;
+    let peak = 0;
+    const results = await app.batch("work", [30, 10, 20, 5, 15], async (ms) => {
+      running++;
+      peak = Math.max(peak, running);
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      running--;
+      if (ms === 20) throw new Error("item failed");
+      return ms * 2;
+    }, { concurrency: 2 });
+    expect(peak).toBe(2);
+    expect(results).toEqual([60, 20, null, 10, 30]);
+  });
+
+  test("defaults to one at a time and rejects a bad concurrency", async () => {
+    configure({ silent: true });
+    let running = 0;
+    let peak = 0;
+    await app.batch("work", [1, 2, 3], async () => {
+      running++; peak = Math.max(peak, running);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      running--;
+    });
+    expect(peak).toBe(1);
+    await expect(app.batch("work", [1], async () => 1, { concurrency: 0 })).rejects.toThrow();
+  });
+});
